@@ -147,6 +147,7 @@ void app_work() {
 
 }
 
+#if 0
 int main(int argc, char **argv)
 {
   signal(SIGINT, app_handlesig);
@@ -163,3 +164,4 @@ int main(int argc, char **argv)
 
   return 0;
 }
+#endif

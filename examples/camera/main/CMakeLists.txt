@@ -5,8 +5,12 @@ list(APPEND ADD_PRIVATE_INCLUDE "")
 ###############################################
 
 ############ Add source files #################
-# list(APPEND ADD_SRCS  "src/main.c"
-#     )
+list(APPEND ADD_SRCS    "src/main.c"
+                        "src/main.cpp"
+                        "src/terminal.cpp"
+                        "src/h264enc.cpp"
+                        "src/tcpserver.cpp"
+    )
 # aux_source_directory(src ADD_SRCS)
 append_srcs_dir(ADD_SRCS "src")
 # list(REMOVE_ITEM COMPONENT_SRCS "src/test2.c")
