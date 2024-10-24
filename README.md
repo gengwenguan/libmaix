@@ -3,6 +3,8 @@ libmaix
 
 [中文 README](README_ZH.md)
 
+![image](https://github.com/gengwenguan/libmaix/blob/release/%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_20241025010039.jpg)
+![image](https://github.com/gengwenguan/libmaix/blob/release/%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_20241025010048.jpg)
 -----
 
 A library for embeded AI model inference with hardware acceleration，let's build a better AIOT together~
@@ -31,7 +33,7 @@ Check `CMake` version by
 cmake --version
 ```
 
-The `cmake` version should be at least `v3.9`, if not, please install latest `cmake` manually from [cmake website](https://cmake.org/download/)
+该 `cmake` version should be at least `v3.9`, if not, please install latest `cmake` manually from [cmake website](https://cmake.org/download/)
 
 * Setup toolchain
 
