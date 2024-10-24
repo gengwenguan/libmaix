@@ -2,6 +2,11 @@ libmaix
 =========
 
 [中文 README](README_ZH.md)
+在libmax的examples/camera例程中增加视频采集显示，编码h264网络传输功能，安卓端工程可进行网络连接接收h264解渲染在安卓设备上
+以下为M2dock开发板程序链接
+https://github.com/gengwenguan/libmaix/tree/release/examples/camera
+以下是安卓工程取流解码渲染链接
+https://github.com/gengwenguan/Mynative
 
 ![image](https://github.com/gengwenguan/libmaix/blob/release/%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_20241025010039.jpg)
 ![image](https://github.com/gengwenguan/libmaix/blob/release/%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_20241025010048.jpg)
