@@ -1,3 +1,11 @@
+/********************************************************************************* 
+  *Copyright(C),Your Company 
+  *FileName:  h264enc.h
+  *Author:    gengwenguan
+  *Date:      2024-10-25
+  *Description:  h264编码类，可将输入的NV21格式YUV数据编码为H264数据
+                 提供强制编码关键帧接口
+**********************************************************************************/ 
 #pragma once
 #include "vencoder.h"
 #include<memory>

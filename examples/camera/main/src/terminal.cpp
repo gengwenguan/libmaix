@@ -7,7 +7,7 @@ C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight)
     m_Hight(Hight),
     m_pH264Enc(new C_h264enc(this, Wight, Hight, Wight, Hight)),
     m_pTcpServer(new C_TcpServer(this)),
-    outputFile("ter.264", std::ios::out | std::ios::binary),
+    outputFile("test.264", std::ios::out | std::ios::binary),  //可将编码h264数据保存到该文件中
     m_pNv12Buff(new unsigned char[Wight*Hight+Wight*Hight/2])
 {
 
@@ -40,6 +40,7 @@ int C_Terminal::OnOutputH264(unsigned char* data, unsigned int dataLen)
     m_pTcpServer->SendH264(data, dataLen);
     //此处放开可进行h264文件写入
     //outputFile.write((const char*)data, dataLen);
+    return 0;
 }
 
 /*新客户端连接事件*/

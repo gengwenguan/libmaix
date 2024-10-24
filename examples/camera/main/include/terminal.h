@@ -1,3 +1,11 @@
+/********************************************************************************* 
+  *Copyright(C),Your Company 
+  *FileName:  terminal.h
+  *Author:    gengwenguan
+  *Date:      2024-10-25
+  *Description:  编码传输终端，支持输入RGB888或NV21格式视频，该类会将
+                 YUV数据编码为h264发送给连接的客户端
+**********************************************************************************/ 
 #pragma once
 #include"h264enc.h"
 #include"tcpserver.h"
