@@ -5,6 +5,9 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 
 constexpr int PORT = 56050;
 C_TcpServer::C_TcpServer(C_Listener* pListrner)
@@ -19,8 +22,10 @@ C_TcpServer::C_TcpServer(C_Listener* pListrner)
 C_TcpServer::~C_TcpServer()
 {
     m_bRunFlag = false;
-    //close(m_server_fd);
-    shutdown(m_server_fd, SHUT_RDWR);  // 关闭监听套接字
+    if(m_server_fd>0){
+        close(m_server_fd);
+        //shutdown(m_server_fd, SHUT_RDWR);  // 关闭监听套接字
+    }
     if(m_pThread != nullptr){
         m_pThread->join();
         delete m_pThread;
@@ -63,11 +68,6 @@ int C_TcpServer::SendH264(unsigned char* pData, unsigned int nLen)
 }
 
 int C_TcpServer::Accept(){
-
-    int new_socket;
-    struct sockaddr_in address;
-    int addrlen = sizeof(address);
-
     // 创建 socket 文件描述符
     if ((m_server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         perror("socket failed");
@@ -75,6 +75,8 @@ int C_TcpServer::Accept(){
     }
 
     // 配置服务器地址信息
+    struct sockaddr_in address;
+    int addrlen = sizeof(address);
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(PORT);
@@ -95,20 +97,37 @@ int C_TcpServer::Accept(){
 
     printf("Server listening on port %d\n", PORT);
 
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(m_server_fd, &read_fds);
+    timeval tm{};
+    tm.tv_sec = 1;
+    tm.tv_usec =0;
     while(m_bRunFlag){
-        // 接受连接
-        if ((new_socket = accept(m_server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
-            perror("accept failed");
-        }else{
-            std::lock_guard<std::mutex> lock(m_oMutex);
-            printf("accept new socket:%d\n", new_socket);
-            m_fdSet.insert(new_socket);
-            //通知监听器有新的客户端连接
-            m_pListrner->OnNewClientConnect(new_socket);
+        fd_set tmp_fds = read_fds;
+        int ret = select(m_server_fd + 1, &tmp_fds, NULL, NULL, &tm);
+        if (ret < 0) {
+            perror("select");
+            break;
+        } else if (ret == 0) { //超时
+            continue;
+        }
+
+        if (FD_ISSET(m_server_fd, &tmp_fds)) {
+            int new_socket;
+            // 接受连接
+            if ((new_socket = accept(m_server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
+                perror("accept failed");
+            }else{
+                std::lock_guard<std::mutex> lock(m_oMutex);
+                printf("accept new socket:%d\n", new_socket);
+                m_fdSet.insert(new_socket);
+                //通知监听器有新的客户端连接
+                m_pListrner->OnNewClientConnect(new_socket);
+            }
         }
     }
 
-    close(m_server_fd);
     printf("End accepted\n");
 
     return 0;
