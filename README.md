@@ -3,6 +3,14 @@ libmaix
 
 [中文 README](README_ZH.md)
 
+在libmax的examples/camera例程中增加视频采集显示，编码h264网络传输功能，安卓端工程可进行网络连到M2dock开发板接收h264解渲染在安卓设备上显示
+
+以下为M2dock开发板程序链接https://github.com/gengwenguan/libmaix/tree/release/examples/camera
+
+以下是安卓工程取流解码渲染链接https://github.com/gengwenguan/Mynative
+
+![image](https://github.com/gengwenguan/libmaix/blob/release/%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_20241025010039.jpg)
+![image](https://github.com/gengwenguan/libmaix/blob/release/%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_20241025010048.jpg)
 -----
 
 A library for embeded AI model inference with hardware acceleration，let's build a better AIOT together~
@@ -31,7 +39,7 @@ Check `CMake` version by
 cmake --version
 ```
 
-The `cmake` version should be at least `v3.9`, if not, please install latest `cmake` manually from [cmake website](https://cmake.org/download/)
+该 `cmake` version should be at least `v3.9`, if not, please install latest `cmake` manually from [cmake website](https://cmake.org/download/)
 
 * Setup toolchain
 
