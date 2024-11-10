@@ -1,3 +1,11 @@
+/********************************************************************************* 
+  *Copyright(C),Your Company 
+  *FileName:  utiltools.h
+  *Author:    gengwenguan
+  *Date:      2024-10-25
+  *Description:  通用工具接口
+**********************************************************************************/ 
+#pragma once
 #include<mutex>
 #include<memory>
 #include<condition_variable>

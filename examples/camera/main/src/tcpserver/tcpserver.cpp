@@ -8,6 +8,7 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include"logAdapt.h"
 
 constexpr int PORT = 56050;
 C_TcpServer::C_TcpServer(C_Listener* pListrner)
@@ -55,7 +56,7 @@ int C_TcpServer::SendH264(unsigned char* pData, unsigned int nLen)
 
         if (ret <= 0) {
             // 发送失败关闭socket
-            printf("send failed, socket:%d closed\n", *it);
+            CLOG_INF("send failed, socket:%d closed\n", *it);
             close(*it);
             // 使用 erase 方法来删除元素，并更新迭代器
             it = m_fdSet.erase(it); 
@@ -95,7 +96,7 @@ int C_TcpServer::Accept(){
         exit(EXIT_FAILURE);
     }
 
-    printf("Server listening on port %d\n", PORT);
+    CLOG_INF("Server listening on port %d\n", PORT);
 
     fd_set read_fds;
     FD_ZERO(&read_fds);
@@ -120,7 +121,7 @@ int C_TcpServer::Accept(){
                 perror("accept failed");
             }else{
                 std::lock_guard<std::mutex> lock(m_oMutex);
-                printf("accept new socket:%d\n", new_socket);
+                CLOG_INF("accept new socket:%d\n", new_socket);
                 m_fdSet.insert(new_socket);
                 //通知监听器有新的客户端连接
                 m_pListrner->OnNewClientConnect(new_socket);
@@ -128,7 +129,7 @@ int C_TcpServer::Accept(){
         }
     }
 
-    printf("End accepted\n");
+    CLOG_INF("End accepted\n");
 
     return 0;
 }

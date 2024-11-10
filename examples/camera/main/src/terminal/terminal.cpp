@@ -1,5 +1,6 @@
-#include "terminal.h"
 #include<iostream>
+#include"logAdapt.h"
+#include "terminal.h"
 
 
 C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight)
@@ -46,7 +47,7 @@ int C_Terminal::OnOutputH264(unsigned char* data, unsigned int dataLen)
 /*新客户端连接事件*/
 int C_Terminal::OnNewClientConnect(int fd)
 {
-    std::cout << "OnNewClientConnect socketfd:" << fd << std::endl;
+    CLOG_INF("OnNewClientConnect socketfd:%d", fd);
     //新客户端加入连接时请求编I帧
     m_pH264Enc->ForceIframe();
     return 0;

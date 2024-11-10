@@ -1,9 +1,10 @@
-#include "h264enc.h"
-#include <string.h>
-#include "memoryAdapter.h"
-#include <stdio.h>
+#include<string.h>
+#include<stdio.h>
 #include<string>
 #include<iostream>
+#include "memoryAdapter.h"
+#include "h264enc.h"
+#include "logAdapt.h"
 
 C_h264enc::C_h264enc(C_Listener* pListener, unsigned int srcWight, unsigned int srcHight, unsigned int dstWidth, unsigned int dstHeight)
     :m_pListener(pListener)
@@ -26,7 +27,7 @@ C_h264enc::C_h264enc(C_Listener* pListener, unsigned int srcWight, unsigned int 
     memset(&m_bufferParam, 0, sizeof(VencAllocateBufferParam));
     m_baseConfig.memops = MemAdapterGetOpsS();
     if (m_baseConfig.memops == NULL)
-        printf("MemAdapterGetOpsS failed\n");
+        CLOG_INF("MemAdapterGetOpsS failed\n");
     CdcMemOpen(m_baseConfig.memops);
     m_baseConfig.nInputWidth = srcWight;
     m_baseConfig.nInputHeight = srcHight;
@@ -54,7 +55,7 @@ C_h264enc::C_h264enc(C_Listener* pListener, unsigned int srcWight, unsigned int 
     VideoEncSetParameter(m_pVideoEnc, VENC_IndexParamSetPSkip, &value);
     int ret = -1;
     ret = VideoEncInit(m_pVideoEnc, &m_baseConfig);
-    std::cout << "VideoEncInit:" << ret << std::endl;
+    CLOG_INF("VideoEncInit:");
     //VideoEncGetParameter(pVideoEnc, VENC_IndexParamH264SPSPPS, &sps_pps_data);
     //fwrite(sps_pps_data.pBuffer, 1, sps_pps_data.nLength, out_file);
     //printf("*****************************\n");
@@ -72,20 +73,18 @@ C_h264enc::C_h264enc(C_Listener* pListener, unsigned int srcWight, unsigned int 
 
 C_h264enc::~C_h264enc()
 {
-    std::cout << "~C_h264enc()" << std::endl;
     CdcMemClose(m_baseConfig.memops);
     if(m_pVideoEnc != nullptr){
         ReleaseAllocInputBuffer(m_pVideoEnc);
         VideoEncUnInit(m_pVideoEnc);
         VideoEncDestroy(m_pVideoEnc);
     }
-    std::cout << "~C_h264enc() end!" << std::endl;
 }
 
 int C_h264enc::InputData(unsigned char* inputData)
 {
     if(m_forceIframe){
-        std::cout << "forceIframe" << std::endl;
+        CLOG_INF("forceIframe");
         int value = 1;
         // 文件第一帧数据保存时强制编码器编I帧，保证视频打开时第一帧就能正常播放
         VideoEncSetParameter(m_pVideoEnc, VENC_IndexParamForceKeyFrame, &value);
@@ -110,24 +109,6 @@ int C_h264enc::InputData(unsigned char* inputData)
 
     if(-1 != ret)
     {
-        // if(out_file == NULL)        
-        // {
-
-        //     std::string filePath = "tmp.264"; //根据当前时间和保存位置生成文件绝对路径
-
-        //     printf("new video file path: %s\n", filePath.c_str());
-
-        //     out_file = fopen(filePath.c_str(),"wb");            
-        //     if (!out_file) {
-        //         std::cerr << "Failed to open file: " << filePath << std::endl;
-        //         return -1; // or handle the error appropriately
-        //     }
-        //     //创建文件后将sps pps信息写入文件
-        //     VideoEncGetParameter(m_pVideoEnc, VENC_IndexParamH264SPSPPS, &m_sps_pps_data);
-        //     fwrite(m_sps_pps_data.pBuffer, 1, m_sps_pps_data.nLength, out_file);            
-        // }
-
-
         //取出数据，写入文件
         //fwrite(m_outputBuffer.pData0, 1, m_outputBuffer.nSize0, out_file);
         m_pListener->OnOutputH264(m_outputBuffer.pData0, m_outputBuffer.nSize0);
@@ -138,10 +119,8 @@ int C_h264enc::InputData(unsigned char* inputData)
             m_pListener->OnOutputH264(m_outputBuffer.pData1, m_outputBuffer.nSize1);
             //mp4Encoder.WriteH264Data(handle_Mp4File,outputBuffer.pData1,outputBuffer.nSize1);
         }
-        
 
         FreeOneBitStreamFrame(m_pVideoEnc, &m_outputBuffer);
-
     }
     return 0;
 }

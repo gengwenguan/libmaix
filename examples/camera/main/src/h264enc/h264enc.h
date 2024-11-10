@@ -7,9 +7,9 @@
                  提供强制编码关键帧接口
 **********************************************************************************/ 
 #pragma once
-#include "vencoder.h"
 #include<memory>
 #include<iostream>
+#include "vencoder.h"
 
 class C_h264enc
 {

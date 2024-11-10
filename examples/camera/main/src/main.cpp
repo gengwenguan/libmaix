@@ -10,6 +10,7 @@
 #include "libmaix_disp.h"
 
 #include "terminal.h"
+#include "logAdapt.h"
 
 #define CALC_FPS(tips)                                                                                     \
   {                                                                                                        \
@@ -40,26 +41,32 @@ static void app_handlesig(int signo)
 
 int main(int argc, char **argv)
 {
+    CLOG_INF("main enter!");
     signal(SIGINT, app_handlesig);
     signal(SIGTERM, app_handlesig);
 
     libmaix_camera_module_init();
     libmaix_image_module_init();
 
-    // struct libmaix_cam*  m_camera = libmaix_cam_create(0, inW, inH, 1, 0);
-    // struct libmaix_disp * m_disp = libmaix_disp_create(0);
-    // m_camera->start_capture(m_camera);
-    // libmaix_image_t *image = nullptr;
-    // C_Terminal* pterminal = new C_Terminal(inW, inH);
-    // while(g_apprun)
-    // {
-    //     m_camera->capture_image(m_camera, &image);
-    //     m_disp->draw_image(m_disp, image);
-    //     pterminal->InputRgb888((unsigned char*)image->data);
-    //     //m_pH264Enc->InputRgb888((unsigned char*)image->data);
-    //     //std::cout << "tmp->data:;" << std::hex << tmp->data << std::endl;
-    // }
-    // delete pterminal;
+//两种方式进行图片采集，此处宏定义区分开
+#if 0
+    struct libmaix_cam*  m_camera = libmaix_cam_create(0, inW, inH, 1, 0);
+    struct libmaix_disp * m_disp = libmaix_disp_create(0);
+    m_camera->start_capture(m_camera);
+    libmaix_image_t *image = nullptr;
+    C_Terminal* pterminal = new C_Terminal(inW, inH);
+    while(g_apprun)
+    {
+        CALC_FPS("g_apprun");
+        m_camera->capture_image(m_camera, &image);
+        m_disp->draw_image(m_disp, image);
+        pterminal->InputRgb888((unsigned char*)image->data);
+        //m_pH264Enc->InputRgb888((unsigned char*)image->data);
+        //std::cout << "tmp->data:;" << std::hex << tmp->data << std::endl;
+    }
+    delete pterminal;
+
+#else
 
     struct libmaix_cam*  m_camera = libmaix_cam_create(0, inW, inH, 1, 0);
     m_camera->start_capture(m_camera);
@@ -67,6 +74,7 @@ int main(int argc, char **argv)
     C_Terminal* pterminal = new C_Terminal(inW, inH);
     while(g_apprun)
     {
+        //CLOG_INF("g_apprun");
         CALC_FPS("g_apprun");
         //std::cout << "g_apprun " << i++ << std::endl;
         std::this_thread::sleep_for(std::chrono::milliseconds(3));
@@ -87,9 +95,11 @@ int main(int argc, char **argv)
     }
     delete pterminal;
 
+#endif
+
     libmaix_camera_module_deinit();
     libmaix_image_module_deinit();
-    std::cout << "main end!" << std::endl;
+    CLOG_INF("main end!");
     return 0;
 
 }

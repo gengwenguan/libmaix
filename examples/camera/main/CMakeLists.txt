@@ -1,18 +1,29 @@
 ############### Add include ###################
 list(APPEND ADD_INCLUDE "include"
+                        "dep/codec/inc"
+                        "src/h264enc"
+                        "src/tcpserver"
+                        "src/terminal"
+                        "src/utiltools"
     )
 list(APPEND ADD_PRIVATE_INCLUDE "")
 ###############################################
 
-############ Add source files #################
-list(APPEND ADD_SRCS    "src/main.c"
-                        "src/main.cpp"
-                        "src/terminal.cpp"
-                        "src/h264enc.cpp"
-                        "src/tcpserver.cpp"
+file(GLOB ADD_SRCS  "src/*.cpp"
+                    "src/h264enc/*.cpp"
+                    "src/tcpserver/*.cpp"
+                    "src/terminal/*.cpp"
+                    "src/utiltools/*.cpp"
     )
+############ Add source files #################
+# list(APPEND ADD_SRCS    "src/main.c"
+#                         "src/main.cpp"
+#                         "src/terminal.cpp"
+#                         "src/h264enc.cpp"
+#                         "src/tcpserver.cpp"
+#     )
 # aux_source_directory(src ADD_SRCS)
-append_srcs_dir(ADD_SRCS "src")
+#append_srcs_dir(ADD_SRCS "src")
 # list(REMOVE_ITEM COMPONENT_SRCS "src/test2.c")
 ###############################################
 
