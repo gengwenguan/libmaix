@@ -13,7 +13,7 @@ C_h264enc::C_h264enc(C_Listener* pListener, unsigned int srcWight, unsigned int 
     m_h264Param.nBitrate = 256*1024;
     m_h264Param.nFramerate = 30;
     m_h264Param.nCodingMode = VENC_FRAME_CODING;
-    m_h264Param.nMaxKeyInterval = 30 * 60; //帧率乘60，相当于最大60秒一个关键帧
+    m_h264Param.nMaxKeyInterval = 60 * 1000; //60秒一个关键帧
     m_h264Param.sProfileLevel.nProfile = VENC_H264ProfileMain;
     m_h264Param.sProfileLevel.nLevel = VENC_H264Level31;
     m_h264Param.sQPRange.nMinqp = 5;  //qp值越小画面越清晰
@@ -55,7 +55,7 @@ C_h264enc::C_h264enc(C_Listener* pListener, unsigned int srcWight, unsigned int 
     VideoEncSetParameter(m_pVideoEnc, VENC_IndexParamSetPSkip, &value);
     int ret = -1;
     ret = VideoEncInit(m_pVideoEnc, &m_baseConfig);
-    CLOG_INF("VideoEncInit:");
+    CLOG_INF("VideoEncInit: %d", ret);
     //VideoEncGetParameter(pVideoEnc, VENC_IndexParamH264SPSPPS, &sps_pps_data);
     //fwrite(sps_pps_data.pBuffer, 1, sps_pps_data.nLength, out_file);
     //printf("*****************************\n");
@@ -83,6 +83,7 @@ C_h264enc::~C_h264enc()
 
 int C_h264enc::InputData(unsigned char* inputData)
 {
+    //真正的强制I帧在送数据时进行控制，这样可以保证sps pps信息后紧跟的为I帧
     if(m_forceIframe){
         CLOG_INF("forceIframe");
         int value = 1;
