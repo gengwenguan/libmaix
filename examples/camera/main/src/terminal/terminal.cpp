@@ -51,7 +51,7 @@ int C_Terminal::OnOutputH264(unsigned char* data, unsigned int dataLen)
 /*新客户端连接事件*/
 int C_Terminal::OnNewClientConnect(int fd)
 {
-    CLOG_INF("OnNewClientConnect socketfd:%d", fd);
+    CLOG_INF("OnNewClientConnect socketfd:%d\n", fd);
     //新客户端加入连接时请求编I帧
     m_pH264Enc->ForceIframe();
     return 0;

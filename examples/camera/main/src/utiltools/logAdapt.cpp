@@ -13,9 +13,20 @@
 C_LogAdapt  gs_objLogNormal;
 
 constexpr int kMaxLogLen = 1024; //最大支持日志输出长度
+C_LogAdapt::C_LogAdapt()
+	:outputFile("run.log", std::ios::out | std::ios::binary)  //可将编码h264数据保存到该文件中
+{
+
+}
+
+C_LogAdapt::~C_LogAdapt()
+{
+	outputFile.close();
+}
 
 /*网络自适应模块不同级别日志输出接口*/
 void C_LogAdapt::LogInner(const char *pscLevel, const char *pscFile, const char *pscFunc, unsigned int uiLine, const char *pscFmt, ...)
+	
 {                     
 	int         siRetVal;                       
 	char        ascFormat[kMaxLogLen] = {0};
@@ -36,9 +47,11 @@ void C_LogAdapt::LogInner(const char *pscLevel, const char *pscFile, const char 
 	va_list stLogAp;
 	va_start(stLogAp, pscFmt);                                     
 	vsnprintf(ascLogBuf, kMaxLogLen, ascFormat, stLogAp);
-	va_end(stLogAp);  
+	va_end(stLogAp);
 
 	std::cout << ascLogBuf << std::endl; //输出详细信息日志
+	outputFile.write(ascLogBuf, strlen(ascLogBuf));
+	outputFile.flush(); //立即刷新到磁盘避免程序异常退出日志丢失
 }
 
 char* C_LogAdapt::getFileName(char *pucFileWithPath)

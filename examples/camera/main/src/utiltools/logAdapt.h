@@ -8,6 +8,7 @@
 #pragma once
 #include <iostream>
 #include <sstream>
+#include <fstream>
 
 /*C_LogAdapt类，
 * 该类提供的打印接口提供以下日志输出格式
@@ -16,8 +17,8 @@
 class C_LogAdapt 
 {
 public:
-	C_LogAdapt() = default;
-	virtual ~C_LogAdapt() = default;
+	C_LogAdapt();
+	virtual ~C_LogAdapt();
 
 	/* 获取日志输出的key，进行设置后可用于区分同一个类多个对象的打印信息 */
 	// GetLogKey() << "自定义信息"  ;
@@ -36,6 +37,7 @@ private:
 
 private:
 	std::ostringstream m_ossKey;  /* 区分不同对象的key信息 */
+	std::ofstream outputFile;
 };
 
 

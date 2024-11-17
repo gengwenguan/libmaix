@@ -85,7 +85,7 @@ int C_h264enc::InputData(unsigned char* inputData)
 {
     //真正的强制I帧在送数据时进行控制，这样可以保证sps pps信息后紧跟的为I帧
     if(m_forceIframe){
-        CLOG_INF("forceIframe");
+        CLOG_INF("forceIframe\n");
         int value = 1;
         // 强制编码器编I帧
         VideoEncSetParameter(m_pVideoEnc, VENC_IndexParamForceKeyFrame, &value);
