@@ -24,19 +24,22 @@ C_TcpServer::~C_TcpServer()
 {
     m_bRunFlag = false;
     if(m_server_fd>0){
+        std::lock_guard<std::mutex> lock(m_oMutex);
+        for(auto it = m_fdSet.begin(); it != m_fdSet.end(); ++it){
+            close(*it);
+        }
+        CLOG_INF("m_fdSet.clear();\n");
+        m_fdSet.clear();
         close(m_server_fd);
         //shutdown(m_server_fd, SHUT_RDWR);  // 关闭监听套接字
     }
+    
     if(m_pThread != nullptr){
         m_pThread->join();
         delete m_pThread;
     }
 
-    std::lock_guard<std::mutex> lock(m_oMutex);
-    for(auto it = m_fdSet.begin(); it != m_fdSet.end();){
-        close(*it);
-    }
-    m_fdSet.clear();
+    CLOG_INF("~C_TcpServer()\n");
 }
 
 //下放H264数据给所有连接的客户端

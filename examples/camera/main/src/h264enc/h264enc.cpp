@@ -10,7 +10,7 @@ C_h264enc::C_h264enc(C_Listener* pListener, unsigned int srcWight, unsigned int 
     :m_pListener(pListener)
 {
     m_h264Param.bEntropyCodingCABAC = 1;
-    m_h264Param.nBitrate = 256*1024;
+    m_h264Param.nBitrate = dstWidth*dstHeight;  //码率设置为分辨率
     m_h264Param.nFramerate = 30;
     m_h264Param.nCodingMode = VENC_FRAME_CODING;
     m_h264Param.nMaxKeyInterval = 60 * 1000; //60秒一个关键帧
@@ -19,7 +19,7 @@ C_h264enc::C_h264enc(C_Listener* pListener, unsigned int srcWight, unsigned int 
     m_h264Param.sQPRange.nMinqp = 5;  //qp值越小画面越清晰
     m_h264Param.sQPRange.nMaxqp = 40;
     m_h264Param.sRcParam.eRcMode = AW_VBR;  //采用动码率VBR，有效降低静态画面编码码率
-    m_h264Param.sRcParam.sVbrParam.uMaxBitRate = 256*1024*3; //vbr最大编码三倍正常码率
+    m_h264Param.sRcParam.sVbrParam.uMaxBitRate = dstWidth*dstHeight*3; //vbr最大编码三倍正常码率
     m_h264Param.sRcParam.sVbrParam.nQuality = 9;
     m_h264Param.sRcParam.sVbrParam.nMovingTh = 20;
 
@@ -87,7 +87,7 @@ int C_h264enc::InputData(unsigned char* inputData)
     if(m_forceIframe){
         CLOG_INF("forceIframe");
         int value = 1;
-        // 文件第一帧数据保存时强制编码器编I帧，保证视频打开时第一帧就能正常播放
+        // 强制编码器编I帧
         VideoEncSetParameter(m_pVideoEnc, VENC_IndexParamForceKeyFrame, &value);
         //创建文件后将sps pps信息写入文件
         VideoEncGetParameter(m_pVideoEnc, VENC_IndexParamH264SPSPPS, &m_sps_pps_data);

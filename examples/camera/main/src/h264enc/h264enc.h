@@ -23,7 +23,7 @@ public:
     ~C_h264enc();
     //输入NV21采集数据
     int InputData(unsigned char* inputData);
-    //强制编码一帧关键帧
+    //强制编码一帧关键帧，关键帧前会回调sps pps信息
     void ForceIframe(){
         std::cout << "ForceIframe()" << std::endl;
         m_forceIframe = true;
@@ -31,12 +31,12 @@ public:
 
 private:
     C_Listener* m_pListener;
-    VideoEncoder *m_pVideoEnc;  //视频编码器
+    VideoEncoder *m_pVideoEnc;       //视频编码器
     VencH264Param m_h264Param;
     VencBaseConfig m_baseConfig;
     VencAllocateBufferParam m_bufferParam;
     VencInputBuffer m_inputBuffer;
-    VencOutputBuffer m_outputBuffer;            
+    VencOutputBuffer m_outputBuffer;
     VencHeaderData m_sps_pps_data;
     bool           m_forceIframe = true;
 

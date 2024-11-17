@@ -37,7 +37,11 @@ int C_Terminal::InputNv21(unsigned char* inputData)
 //编码器回调的H264数据
 int C_Terminal::OnOutputH264(unsigned char* data, unsigned int dataLen)
 {
+    //打印编码出的帧信息
+    //printf("%d %d %d %d %x %d ", data[0], data[1],data[2],data[3], data[4], data[4]&0x1f);
     //std::cout << "dataLen:" << dataLen << std::endl;
+
+    //通过tcp将数据发送给客户端
     m_pTcpServer->SendH264(data, dataLen);
     //此处放开可进行h264文件写入
     //outputFile.write((const char*)data, dataLen);
