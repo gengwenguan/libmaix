@@ -45,12 +45,15 @@ void C_LogAdapt::LogInner(const char *pscLevel, const char *pscFile, const char 
 		auto fileDeleter = [](std::ofstream* pobj){ pobj->close(); delete pobj; };
 		//使用静态智能指针，程序退出后资源释放文件正常关闭
 		static std::unique_ptr<std::ofstream> outputFile = std::unique_ptr<std::ofstream>(
-			new std::ofstream("run.log", std::ios::out | std::ios::binary),
+			new std::ofstream(kFileName, std::ios::out | std::ios::binary),
 			fileDeleter
 		);
-		outputFile->write(ascLogBuf, strlen(ascLogBuf));
-		//立即刷新到磁盘避免程序异常退出日志丢失
-		outputFile->flush(); 
+		//文件正常打开时进行写入
+		if(outputFile->is_open()){
+			outputFile->write(ascLogBuf, strlen(ascLogBuf));
+			//立即刷新到磁盘避免程序异常退出日志丢失
+			outputFile->flush(); 
+		}
 	}
 
 }
