@@ -3,7 +3,7 @@
   *FileName:  logAdapt.h
   *Author:    gengwenguan
   *Date:      2024-10-25
-  *Description:    日志适配类,使用该接口后可获得更为详细的日志输出
+  *Description:    日志适配类,使用该接口后可获得更为详细的日志输出,以及控制日志是否写入到文件中
 **********************************************************************************/ 
 #pragma once
 #include <iostream>
@@ -16,6 +16,10 @@
 */
 class C_LogAdapt 
 {
+private：
+	static constexpr int kMaxLogLen = 1024;             //最大支持日志输出长度
+	static constexpr bool kWriteFile = true;            //是否将每条日志写入到文件
+	static constexpr const char* kFileName = "run.log"; //开启日志写入文件时的日志文件名
 public:
 	C_LogAdapt();
 	virtual ~C_LogAdapt();
@@ -37,7 +41,6 @@ private:
 
 private:
 	std::ostringstream m_ossKey;  /* 区分不同对象的key信息 */
-	std::ofstream outputFile;
 };
 
 
