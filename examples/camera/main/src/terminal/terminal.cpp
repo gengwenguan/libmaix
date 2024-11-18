@@ -8,7 +8,6 @@ C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight)
     m_Hight(Hight),
     m_pH264Enc(new C_h264enc(this, Wight, Hight, Wight, Hight)),
     m_pTcpServer(new C_TcpServer(this)),
-    outputFile("test.264", std::ios::out | std::ios::binary),  //可将编码h264数据保存到该文件中
     m_pNv12Buff(new unsigned char[Wight*Hight+Wight*Hight/2])
 {
 
@@ -16,7 +15,6 @@ C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight)
 
 
 C_Terminal::~C_Terminal(){
-    outputFile.close();
 }
 
 //送人采集数据
@@ -43,8 +41,21 @@ int C_Terminal::OnOutputH264(unsigned char* data, unsigned int dataLen)
 
     //通过tcp将数据发送给客户端
     m_pTcpServer->SendH264(data, dataLen);
-    //此处放开可进行h264文件写入
-    //outputFile.write((const char*)data, dataLen);
+
+    //此处可控制h264文件写入文件
+	if(false){ 
+		//智能指针删除器
+		auto fileDeleter = [](std::ofstream* pobj){ pobj->close(); delete pobj; };
+		//使用静态智能指针，程序退出后资源释放文件正常关闭
+		static auto outputFile = std::unique_ptr<std::ofstream, decltype(fileDeleter)>(
+			new std::ofstream("encode.h264", std::ios::out | std::ios::binary),
+			fileDeleter
+		);
+		//文件正常打开时进行写入
+		if(outputFile->is_open()){
+			outputFile->write((const char*)data, dataLen);
+		}
+	}
     return 0;
 }
 

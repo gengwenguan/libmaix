@@ -16,10 +16,8 @@
 */
 class C_LogAdapt 
 {
-private：
+private:
 	static constexpr int kMaxLogLen = 1024;             //最大支持日志输出长度
-	static constexpr bool kWriteFile = true;            //是否将每条日志写入到文件
-	static constexpr const char* kFileName = "run.log"; //开启日志写入文件时的日志文件名
 public:
 	/* 获取日志输出的key，进行设置后可用于区分同一个类多个对象的打印信息 */
 	// GetLogKey() << "自定义信息"  ;
@@ -29,12 +27,13 @@ public:
 	/*不同级别日志输出接口*/
 	void LogInner(const char *pscLevel, const char *pscFile, const char *pscFunc, unsigned int uiLine, const char *pscFmt, ...);
 
-private:
+	//获取当前系统时间
+	static std::string GetCurrentDateTimeInChina();
 
+private:
 	/*从文件存放路径中提取文件名，兼容windows和Linux平台*/
 	char *getFileName(char *pucFileWithPath);
-	//获取当前系统时间
-	std::string getCurrentDateTimeInChina();
+
 
 private:
 	std::ostringstream m_ossKey;  /* 区分不同对象的key信息 */

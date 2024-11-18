@@ -101,7 +101,7 @@ std::string get_ipv4_address() {
 
 int main(int argc, char **argv)
 {
-    CLOG_INF("main enter!");
+    CLOG_INF("main enter!\n");
     signal(SIGINT, app_handlesig);
     signal(SIGTERM, app_handlesig);
 
@@ -161,7 +161,7 @@ int main(int argc, char **argv)
         void *frame = m_vo->get_frame(m_vo, 0);
         //printf("frame addr %p\n", frame);
         if(frame == nullptr){ 
-            std::cout << "frame == nullptr " << std::endl;
+            CLOG_INF("frame == nullptr\n");
             continue;
         }
         //获取一帧数据存放的内存地址
@@ -171,13 +171,17 @@ int main(int argc, char **argv)
         //摄像头直接将数据采集到对应的内存位置
         libmaix_err_t reterr = m_camera->capture(m_camera, (unsigned char *)vir[0]);
         if(reterr != LIBMAIX_ERR_NONE){ 
-            std::cout << "reterr != LIBMAIX_ERR_NONE" << std::endl;
+            CLOG_INF("reterr != LIBMAIX_ERR_NONE\n");
         }
 
-        //将该设备的ip地址渲染到图片上
+        //将该设备的ip地址渲染到图片最上方
         cv::Mat gray(kCamInH, kCamInW, CV_8UC1, (unsigned char *)vir[0]);
         cv::putText(gray, get_ipv4_address().c_str(), cv::Point(5, 30), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(255), 2);
-        
+        //将日期时间渲染到图片最下方
+        std::string strData = C_LogAdapt::GetCurrentDateTimeInChina();
+        strData.erase(strData.size() - 4, 4); //去除时间中的毫秒
+        cv::putText(gray, strData.c_str(), cv::Point(5, kCamInH-5), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(255), 2);
+
         //YUV图片输出到屏幕上显示
         m_vo->set_frame(m_vo, frame, 0);
         //YUV图片通过编码后通过网络发送给客户端，摄像头直接采集的为nv12格式的YUV图片
@@ -193,7 +197,7 @@ int main(int argc, char **argv)
 
     libmaix_camera_module_deinit();
     libmaix_image_module_deinit();
-    CLOG_INF("main end!");
+    CLOG_INF("main end!\n");
     return 0;
 
 }

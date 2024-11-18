@@ -13,14 +13,13 @@
 C_LogAdapt  gs_objLogNormal;
 
 /*网络自适应模块不同级别日志输出接口*/
-void C_LogAdapt::LogInner(const char *pscLevel, const char *pscFile, const char *pscFunc, unsigned int uiLine, const char *pscFmt, ...)
-	
-{                     
+void C_LogAdapt::LogInner(const char *pscLevel, const char *pscFile, const char *pscFunc, unsigned int uiLine, const char *pscFmt, ...)	
+{
 	int         siRetVal;                       
 	char        ascFormat[kMaxLogLen] = {0};
                                    
 	siRetVal = snprintf(ascFormat, kMaxLogLen, "%s %s:[ %s ]<%s:%d:%s>: %s",
-		getCurrentDateTimeInChina().c_str(),
+		GetCurrentDateTimeInChina().c_str(),
 	    pscLevel,
 		m_ossKey.str().c_str(),
 		getFileName((char *)pscFile), 
@@ -40,12 +39,12 @@ void C_LogAdapt::LogInner(const char *pscLevel, const char *pscFile, const char 
 	std::cout << ascLogBuf << std::endl; //输出详细信息日志
 
 	//在控制日志写入文件时将日志写入文件中
-	if(kWriteFile){ 
-		//文件删除器
+	if(true){ 
+		//智能指针删除器
 		auto fileDeleter = [](std::ofstream* pobj){ pobj->close(); delete pobj; };
 		//使用静态智能指针，程序退出后资源释放文件正常关闭
-		static std::unique_ptr<std::ofstream> outputFile = std::unique_ptr<std::ofstream>(
-			new std::ofstream(kFileName, std::ios::out | std::ios::binary),
+		static auto outputFile = std::unique_ptr<std::ofstream, decltype(fileDeleter)>(
+			new std::ofstream("run.log", std::ios::out | std::ios::binary),
 			fileDeleter
 		);
 		//文件正常打开时进行写入
@@ -55,7 +54,6 @@ void C_LogAdapt::LogInner(const char *pscLevel, const char *pscFile, const char 
 			outputFile->flush(); 
 		}
 	}
-
 }
 
 char* C_LogAdapt::getFileName(char *pucFileWithPath)
@@ -76,7 +74,7 @@ char* C_LogAdapt::getFileName(char *pucFileWithPath)
 constexpr int CHINA_TIME_OFFSET = 8 * 60 * 60; // 秒
 
 // 定义一个函数，返回包含当前中国时间的字符串
-std::string C_LogAdapt::getCurrentDateTimeInChina() {
+std::string C_LogAdapt::GetCurrentDateTimeInChina() {
     // 获取当前时间点
     auto now = std::chrono::system_clock::now();
 

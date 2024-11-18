@@ -6,6 +6,7 @@
 #include "h264enc.h"
 #include "logAdapt.h"
 
+//输入的YUV分辨率和编码输出的h264分辨率
 C_h264enc::C_h264enc(C_Listener* pListener, unsigned int srcWight, unsigned int srcHight, unsigned int dstWidth, unsigned int dstHeight)
     :m_pListener(pListener)
 {
@@ -13,7 +14,7 @@ C_h264enc::C_h264enc(C_Listener* pListener, unsigned int srcWight, unsigned int 
     m_h264Param.nBitrate = dstWidth*dstHeight;  //码率设置为分辨率
     m_h264Param.nFramerate = 30;
     m_h264Param.nCodingMode = VENC_FRAME_CODING;
-    m_h264Param.nMaxKeyInterval = 60 * 1000; //60秒一个关键帧
+    m_h264Param.nMaxKeyInterval = 60 * 1000; //60秒一个关键帧，此处配置似乎并不生效，实际编码好像每1~2秒会出一个I帧
     m_h264Param.sProfileLevel.nProfile = VENC_H264ProfileMain;
     m_h264Param.sProfileLevel.nLevel = VENC_H264Level31;
     m_h264Param.sQPRange.nMinqp = 5;  //qp值越小画面越清晰
@@ -55,7 +56,7 @@ C_h264enc::C_h264enc(C_Listener* pListener, unsigned int srcWight, unsigned int 
     VideoEncSetParameter(m_pVideoEnc, VENC_IndexParamSetPSkip, &value);
     int ret = -1;
     ret = VideoEncInit(m_pVideoEnc, &m_baseConfig);
-    CLOG_INF("VideoEncInit: %d", ret);
+    CLOG_INF("VideoEncInit: %d\n", ret);
     //VideoEncGetParameter(pVideoEnc, VENC_IndexParamH264SPSPPS, &sps_pps_data);
     //fwrite(sps_pps_data.pBuffer, 1, sps_pps_data.nLength, out_file);
     //printf("*****************************\n");
@@ -81,18 +82,15 @@ C_h264enc::~C_h264enc()
     }
 }
 
+//输入NV21采集数据
 int C_h264enc::InputData(unsigned char* inputData)
 {
-    //真正的强制I帧在送数据时进行控制，这样可以保证sps pps信息后紧跟的为I帧
+    //真正的强制I帧在送数据时进行控制
     if(m_forceIframe){
         CLOG_INF("forceIframe\n");
         int value = 1;
         // 强制编码器编I帧
         VideoEncSetParameter(m_pVideoEnc, VENC_IndexParamForceKeyFrame, &value);
-        //创建文件后将sps pps信息写入文件
-        VideoEncGetParameter(m_pVideoEnc, VENC_IndexParamH264SPSPPS, &m_sps_pps_data);
-        //fwrite(m_sps_pps_data.pBuffer, 1, m_sps_pps_data.nLength, out_file);   
-        m_pListener->OnOutputH264(m_sps_pps_data.pBuffer, m_sps_pps_data.nLength);
         m_forceIframe = false;
     }
 
@@ -110,15 +108,17 @@ int C_h264enc::InputData(unsigned char* inputData)
 
     if(-1 != ret)
     {
-        //取出数据，写入文件
-        //fwrite(m_outputBuffer.pData0, 1, m_outputBuffer.nSize0, out_file);
+        //编码出的h264数据如果是IDR帧则在帧前增加sps，pps信息，这样可以让保存的h264文件在在跳转到任意I帧位置解码播放
+        if(getNALType(m_outputBuffer.pData0, m_outputBuffer.nSize0) == NAL_IDR_PICTURE){
+            //创建文件后将sps pps信息写入文件
+            VideoEncGetParameter(m_pVideoEnc, VENC_IndexParamH264SPSPPS, &m_sps_pps_data);
+            m_pListener->OnOutputH264(m_sps_pps_data.pBuffer, m_sps_pps_data.nLength);
+        }
+        //回调编码出的h264数据,
         m_pListener->OnOutputH264(m_outputBuffer.pData0, m_outputBuffer.nSize0);
-        //mp4Encoder.WriteH264Data(handle_Mp4File,outputBuffer.pData0,outputBuffer.nSize0);
         if (m_outputBuffer.nSize1)
         {
-            //fwrite(m_outputBuffer.pData1, 1, m_outputBuffer.nSize1, out_file);
             m_pListener->OnOutputH264(m_outputBuffer.pData1, m_outputBuffer.nSize1);
-            //mp4Encoder.WriteH264Data(handle_Mp4File,outputBuffer.pData1,outputBuffer.nSize1);
         }
 
         FreeOneBitStreamFrame(m_pVideoEnc, &m_outputBuffer);
@@ -126,5 +126,22 @@ int C_h264enc::InputData(unsigned char* inputData)
     return 0;
 }
 
+// 判断NAL单元类型
+C_h264enc::NALUnitType C_h264enc::getNALType(unsigned char* data, unsigned int dataLen)
+{
+    size_t pos = 0;
+
+    // 跳过起始码
+    if (dataLen >= 4 && data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x00 && data[3] == 0x01) {
+        pos = 4;
+    } else if (dataLen >= 3 && data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01) {
+        pos = 3;
+    } else {
+        CLOG_INF("Invalid NAL unit format.\n");
+        return NAL_UNKNOWN; // 无效的NAL单元类型
+    }
+
+    return static_cast<NALUnitType>(data[pos] & 0x1F);  // 获取NAL单元类型的低5位
+}
 
 

@@ -43,7 +43,6 @@ private:
 
     std::unique_ptr<C_h264enc>   m_pH264Enc;
     std::unique_ptr<C_TcpServer> m_pTcpServer;
-    std::ofstream outputFile;
 
     std::unique_ptr<unsigned char[]> m_pNv12Buff;
 
