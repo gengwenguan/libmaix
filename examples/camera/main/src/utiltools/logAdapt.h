@@ -21,9 +21,6 @@ private：
 	static constexpr bool kWriteFile = true;            //是否将每条日志写入到文件
 	static constexpr const char* kFileName = "run.log"; //开启日志写入文件时的日志文件名
 public:
-	C_LogAdapt();
-	virtual ~C_LogAdapt();
-
 	/* 获取日志输出的key，进行设置后可用于区分同一个类多个对象的打印信息 */
 	// GetLogKey() << "自定义信息"  ;
 	// 按照以上方式设置，可输出带自定义信息的日志
