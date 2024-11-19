@@ -4,7 +4,6 @@
 #include <iostream>
 #include <chrono>
 #include <ctime>
-#include <sstream>
 #include <iomanip> // 用于设置输出格式
 #include <cmath>   // 用于计算时差
 #include "logAdapt.h"
@@ -47,11 +46,22 @@ void C_LogAdapt::LogInner(const char *pscLevel, const char *pscFile, const char 
 			new std::ofstream("run.log", std::ios::out | std::ios::binary),
 			fileDeleter
 		);
+		static unsigned int fileSize = 0; //统计写入的文件大小
+
 		//文件正常打开时进行写入
 		if(outputFile->is_open()){
 			outputFile->write(ascLogBuf, strlen(ascLogBuf));
 			//立即刷新到磁盘避免程序异常退出日志丢失
 			outputFile->flush(); 
+
+			//日志大小达到10M时进行关闭重新创建，避免出现日志所占存储无限增长的情况
+			fileSize += strlen(ascLogBuf);
+			if(fileSize > 10 * 1024 * 1024){
+				fileSize = 0;
+				outputFile->close();
+				outputFile->open("run.log", std::ios::out | std::ios::binary);
+			}
+
 		}
 	}
 }

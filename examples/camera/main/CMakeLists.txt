@@ -5,6 +5,7 @@ list(APPEND ADD_INCLUDE "include"
                         "src/tcpserver"
                         "src/terminal"
                         "src/utiltools"
+                        "src/filemng"
     )
 list(APPEND ADD_PRIVATE_INCLUDE "")
 ###############################################
@@ -14,6 +15,7 @@ file(GLOB ADD_SRCS  "src/*.cpp"
                     "src/tcpserver/*.cpp"
                     "src/terminal/*.cpp"
                     "src/utiltools/*.cpp"
+                    "src/filemng/*.cpp"
     )
 ############ Add source files #################
 # list(APPEND ADD_SRCS    "src/main.c"

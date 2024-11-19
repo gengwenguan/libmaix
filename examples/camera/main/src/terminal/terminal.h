@@ -7,11 +7,13 @@
                  YUV数据编码为h264发送给连接的客户端
 **********************************************************************************/ 
 #pragma once
-#include"h264enc.h"
-#include"tcpserver.h"
 #include <fstream>
 #include "libmaix_cam.h"
 #include "libmaix_disp.h"
+#include"h264enc.h"
+#include"tcpserver.h"
+#include"filemng.h"
+
 
 class C_Terminal : public C_h264enc::C_Listener,
                    public C_TcpServer::C_Listener
@@ -43,6 +45,7 @@ private:
 
     std::unique_ptr<C_h264enc>   m_pH264Enc;
     std::unique_ptr<C_TcpServer> m_pTcpServer;
+    std::unique_ptr<C_FileMng>   m_pFileMng;
 
     std::unique_ptr<unsigned char[]> m_pNv12Buff;
 

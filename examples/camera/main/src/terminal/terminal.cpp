@@ -8,6 +8,7 @@ C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight)
     m_Hight(Hight),
     m_pH264Enc(new C_h264enc(this, Wight, Hight, Wight, Hight)),
     m_pTcpServer(new C_TcpServer(this)),
+    m_pFileMng(new C_FileMng()),
     m_pNv12Buff(new unsigned char[Wight*Hight+Wight*Hight/2])
 {
 
@@ -39,10 +40,10 @@ int C_Terminal::OnOutputH264(unsigned char* data, unsigned int dataLen)
     //printf("%d %d %d %d %x %d ", data[0], data[1],data[2],data[3], data[4], data[4]&0x1f);
     //std::cout << "dataLen:" << dataLen << std::endl;
 
-    //通过tcp将数据发送给客户端
-    m_pTcpServer->SendH264(data, dataLen);
+    //文件数据进行保存管理
+    m_pFileMng->InputFileData(data, dataLen);
 
-    //此处可控制h264文件写入文件
+    //此处可控制h264文件写入文件，用于临时测试数据是否正常
 	if(false){ 
 		//智能指针删除器
 		auto fileDeleter = [](std::ofstream* pobj){ pobj->close(); delete pobj; };
@@ -56,7 +57,9 @@ int C_Terminal::OnOutputH264(unsigned char* data, unsigned int dataLen)
 			outputFile->write((const char*)data, dataLen);
 		}
 	}
-    return 0;
+
+    //通过tcp将数据发送给客户端
+    return m_pTcpServer->SendH264(data, dataLen);
 }
 
 /*新客户端连接事件*/
