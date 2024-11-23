@@ -19,7 +19,7 @@ void C_LogAdapt::LogInner(const char *pscLevel, const char *pscFile, const char 
                                    
 	siRetVal = snprintf(ascFormat, kMaxLogLen, "%s %s:[ %s ]<%s:%d:%s>: %s",
 		GetCurrentDateTimeInChina().c_str(),
-	    pscLevel,
+		pscLevel,
 		m_ossKey.str().c_str(),
 		getFileName((char *)pscFile), 
 		uiLine, pscFunc, pscFmt);           
@@ -84,7 +84,7 @@ char* C_LogAdapt::getFileName(char *pucFileWithPath)
 constexpr int CHINA_TIME_OFFSET = 8 * 60 * 60; // 秒
 
 // 定义一个函数，返回包含当前中国时间的字符串
-std::string C_LogAdapt::GetCurrentDateTimeInChina() {
+std::string C_LogAdapt::GetCurrentDateTimeInChina(bool bNoMs) {
     // 获取当前时间点
     auto now = std::chrono::system_clock::now();
 
@@ -109,8 +109,9 @@ std::string C_LogAdapt::GetCurrentDateTimeInChina() {
         << std::setw(2) << std::setfill('0') << china_time.tm_mday << " "
         << std::setw(2) << std::setfill('0') << china_time.tm_hour << ":"
         << std::setw(2) << std::setfill('0') << china_time.tm_min << ":"
-        << std::setw(2) << std::setfill('0') << china_time.tm_sec << "."
-        << std::setw(3) << std::setfill('0') << millis; // 毫秒部分填充到3位
+        << std::setw(2) << std::setfill('0') << china_time.tm_sec;
+	if(!bNoMs)
+		oss << "." << std::setw(3) << std::setfill('0') << millis; // 毫秒部分填充到3位
 
     // 返回格式化后的字符串
     return oss.str();

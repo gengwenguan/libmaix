@@ -13,17 +13,20 @@
 #include <thread>
 #include <mutex>
 #include <set>
+#include <memory>
 
 class C_TcpServer
 {
+private:
+    static constexpr int PORT = 56050; //监听端口
 public:
     class C_Listener
-        {
-        public:
-            virtual ~C_Listener() = default;
-            /*新客户端连接事件*/
-            virtual int OnNewClientConnect(int fd) = 0;
-        };
+    {
+    public:
+        virtual ~C_Listener() = default;
+        /*新客户端连接事件*/
+        virtual int OnNewClientConnect(int fd) = 0;
+    };
 public:
     C_TcpServer(C_Listener* pListrner);
     ~C_TcpServer();
@@ -36,11 +39,11 @@ private:
     int Accept();
 
 private:
-    C_Listener*  m_pListrner;  //监听器
-    std::thread* m_pThread;    //接收客户端连接线程
-    bool         m_bRunFlag;   //线程运行标识
-    int          m_server_fd;
+    C_Listener*  m_pListrner;                  //监听器
+    bool         m_bRunFlag;                   //线程运行标识
+    std::unique_ptr<std::thread> m_pThread;    //接收客户端连接线程
 
+    int          m_server_fd;
 
     std::mutex    m_oMutex;    //互斥锁
     std::set<int> m_fdSet;     //客户端连接集合

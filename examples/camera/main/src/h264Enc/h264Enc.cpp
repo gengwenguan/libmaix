@@ -3,11 +3,11 @@
 #include<string>
 #include<iostream>
 #include "memoryAdapter.h"
-#include "h264enc.h"
+#include "h264Enc.h"
 #include "logAdapt.h"
 
 //输入的YUV分辨率和编码输出的h264分辨率
-C_h264enc::C_h264enc(C_Listener* pListener, unsigned int srcWight, unsigned int srcHight, unsigned int dstWidth, unsigned int dstHeight)
+C_h264Enc::C_h264Enc(C_Listener* pListener, unsigned int srcWight, unsigned int srcHight, unsigned int dstWidth, unsigned int dstHeight)
     :m_pListener(pListener)
 {
     m_h264Param.bEntropyCodingCABAC = 1;
@@ -72,7 +72,7 @@ C_h264enc::C_h264enc(C_Listener* pListener, unsigned int srcWight, unsigned int 
     m_inputBuffer.sCropInfo.nHeight = srcHight;
 }
 
-C_h264enc::~C_h264enc()
+C_h264Enc::~C_h264Enc()
 {
     CdcMemClose(m_baseConfig.memops);
     if(m_pVideoEnc != nullptr){
@@ -83,7 +83,7 @@ C_h264enc::~C_h264enc()
 }
 
 //输入NV21采集数据
-int C_h264enc::InputData(unsigned char* inputData)
+int C_h264Enc::InputData(unsigned char* inputData)
 {
     //真正的强制I帧在送数据时进行控制
     if(m_forceIframe){
@@ -109,7 +109,7 @@ int C_h264enc::InputData(unsigned char* inputData)
     if(-1 != ret)
     {
         //编码出的h264数据如果是IDR帧则在帧前增加sps，pps信息，这样可以让保存的h264文件在在跳转到任意I帧位置解码播放
-        if(getNALType(m_outputBuffer.pData0, m_outputBuffer.nSize0) == NAL_IDR_PICTURE){
+        if(GetNALType(m_outputBuffer.pData0, m_outputBuffer.nSize0) == NAL_IDR_PICTURE){
             //创建文件后将sps pps信息写入文件
             VideoEncGetParameter(m_pVideoEnc, VENC_IndexParamH264SPSPPS, &m_sps_pps_data);
             m_pListener->OnOutputH264(m_sps_pps_data.pBuffer, m_sps_pps_data.nLength);
@@ -127,7 +127,7 @@ int C_h264enc::InputData(unsigned char* inputData)
 }
 
 // 判断NAL单元类型
-C_h264enc::NALUnitType C_h264enc::getNALType(unsigned char* data, unsigned int dataLen)
+C_h264Enc::NALUnitType C_h264Enc::GetNALType(unsigned char* data, unsigned int dataLen)
 {
     size_t pos = 0;
 
@@ -144,4 +144,39 @@ C_h264enc::NALUnitType C_h264enc::getNALType(unsigned char* data, unsigned int d
     return static_cast<NALUnitType>(data[pos] & 0x1F);  // 获取NAL单元类型的低5位
 }
 
+/******************************************************************************
+* 功  能：获取一个h.264 nalu
+* 参  数：buffer - 目标缓冲区
+* 返回值：返回错误码或nalu长度
+******************************************************************************/
+int C_h264Enc::get_h264_nalu(unsigned char  *buffer, unsigned length)
+{
+    unsigned pos = 0;
 
+    //先取出第一个起始码 0x00000001
+//    while(!feof(fp_video_in) && (buffer[pos++] = fgetc(fp_video_in)) == 0);
+//    if(feof(fp_video_in) || buffer[pos - 1] != 1 || pos < 4)
+//    {
+//        return -1;
+//    }
+
+    while (pos < length-1 && buffer[pos++] == 0);
+    if (buffer[pos - 1] != 1 || pos < 4)
+    {
+        return -1;
+    }
+
+    //连续读取码流直到出现下一个起始码 0x00000001
+    do
+    {
+//		buffer[pos++] = fgetc(fp_video_in);
+        pos++;
+        if (pos >= length)
+        {
+            return (pos);
+        }
+    } while( buffer[pos-4] != 0 ||buffer[pos-3] != 0 || buffer[pos-2] != 0 || buffer[pos-1] != 1);
+
+
+    return (pos - 4);
+}

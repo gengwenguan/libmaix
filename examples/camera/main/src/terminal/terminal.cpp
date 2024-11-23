@@ -6,7 +6,7 @@
 C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight)
     :m_Wight(Wight),
     m_Hight(Hight),
-    m_pH264Enc(new C_h264enc(this, Wight, Hight, Wight, Hight)),
+    m_pH264Enc(new C_h264Enc(this, Wight, Hight, Wight, Hight)),
     m_pTcpServer(new C_TcpServer(this)),
     m_pFileMng(new C_FileMng()),
     m_pNv12Buff(new unsigned char[Wight*Hight+Wight*Hight/2])

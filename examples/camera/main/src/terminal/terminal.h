@@ -10,12 +10,12 @@
 #include <fstream>
 #include "libmaix_cam.h"
 #include "libmaix_disp.h"
-#include"h264enc.h"
-#include"tcpserver.h"
-#include"filemng.h"
+#include "h264Enc.h"
+#include "tcpserver.h"
+#include "fileMng.h"
 
 
-class C_Terminal : public C_h264enc::C_Listener,
+class C_Terminal : public C_h264Enc::C_Listener,
                    public C_TcpServer::C_Listener
 {
 public:
@@ -43,7 +43,7 @@ private:
     unsigned int m_Wight;
     unsigned int m_Hight;
 
-    std::unique_ptr<C_h264enc>   m_pH264Enc;
+    std::unique_ptr<C_h264Enc>   m_pH264Enc;
     std::unique_ptr<C_TcpServer> m_pTcpServer;
     std::unique_ptr<C_FileMng>   m_pFileMng;
 

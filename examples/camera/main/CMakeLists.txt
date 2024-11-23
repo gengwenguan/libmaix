@@ -1,21 +1,21 @@
 ############### Add include ###################
 list(APPEND ADD_INCLUDE "include"
                         "dep/codec/inc"
-                        "src/h264enc"
-                        "src/tcpserver"
+                        "src/h264Enc"
+                        "src/tcpServer"
                         "src/terminal"
-                        "src/utiltools"
-                        "src/filemng"
+                        "src/utilTools"
+                        "src/fileMng"
     )
 list(APPEND ADD_PRIVATE_INCLUDE "")
 ###############################################
 
 file(GLOB ADD_SRCS  "src/*.cpp"
-                    "src/h264enc/*.cpp"
-                    "src/tcpserver/*.cpp"
+                    "src/h264Enc/*.cpp"
+                    "src/tcpServer/*.cpp"
                     "src/terminal/*.cpp"
-                    "src/utiltools/*.cpp"
-                    "src/filemng/*.cpp"
+                    "src/utilTools/*.cpp"
+                    "src/fileMng/*.cpp"
     )
 ############ Add source files #################
 # list(APPEND ADD_SRCS    "src/main.c"

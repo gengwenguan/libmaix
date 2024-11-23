@@ -102,6 +102,7 @@ std::string get_ipv4_address() {
 int main(int argc, char **argv)
 {
     CLOG_INF("main enter!\n");
+    std::this_thread::sleep_for(std::chrono::milliseconds(3000));  //启动时先等待一会让设备获取到ip地址和时间
     signal(SIGINT, app_handlesig);
     signal(SIGTERM, app_handlesig);
 
@@ -178,8 +179,7 @@ int main(int argc, char **argv)
         cv::Mat gray(kCamInH, kCamInW, CV_8UC1, (unsigned char *)vir[0]);
         cv::putText(gray, get_ipv4_address().c_str(), cv::Point(5, 30), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(255), 2);
         //将日期时间渲染到图片最下方
-        std::string strData = C_LogAdapt::GetCurrentDateTimeInChina();
-        strData.erase(strData.size() - 4, 4); //去除时间中的毫秒
+        std::string strData = C_LogAdapt::GetCurrentDateTimeInChina(true);
         cv::putText(gray, strData.c_str(), cv::Point(5, kCamInH-5), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(255), 2);
 
         //YUV图片输出到屏幕上显示

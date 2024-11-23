@@ -10,19 +10,20 @@
 #include <netinet/in.h>
 #include"logAdapt.h"
 
-constexpr int PORT = 56050;
 C_TcpServer::C_TcpServer(C_Listener* pListrner)
-    :m_pListrner(pListrner)
+    :m_pListrner(pListrner),
+    m_bRunFlag(true),
+    m_pThread( new std::thread( [this]() { this->Accept(); }) )
 {
-    m_bRunFlag = true;
-    m_pThread = new std::thread([this]() {
-                this->Accept();
-            });
 }
 
 C_TcpServer::~C_TcpServer()
 {
     m_bRunFlag = false;
+    if(m_pThread != nullptr){
+        m_pThread->join();
+    }
+
     if(m_server_fd>0){
         std::lock_guard<std::mutex> lock(m_oMutex);
         for(auto it = m_fdSet.begin(); it != m_fdSet.end(); ++it){
@@ -32,11 +33,6 @@ C_TcpServer::~C_TcpServer()
         m_fdSet.clear();
         close(m_server_fd);
         //shutdown(m_server_fd, SHUT_RDWR);  // 关闭监听套接字
-    }
-
-    if(m_pThread != nullptr){
-        m_pThread->join();
-        delete m_pThread;
     }
 
     CLOG_INF("~C_TcpServer()\n");

@@ -27,8 +27,8 @@ public:
 	/*不同级别日志输出接口*/
 	void LogInner(const char *pscLevel, const char *pscFile, const char *pscFunc, unsigned int uiLine, const char *pscFmt, ...);
 
-	//获取当前系统时间
-	static std::string GetCurrentDateTimeInChina();
+	//获取当前系统时间 bNoMs为true时输出输出时间不带ms
+	static std::string GetCurrentDateTimeInChina(bool bNoMs = false);
 
 private:
 	/*从文件存放路径中提取文件名，兼容windows和Linux平台*/

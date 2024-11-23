@@ -1,6 +1,6 @@
 /********************************************************************************* 
   *Copyright(C),Your Company 
-  *FileName:  h264enc.h
+  *FileName:  h264Enc.h
   *Author:    gengwenguan
   *Date:      2024-10-25
   *Description:  h264编码类，可将输入的NV21格式YUV数据编码为H264数据
@@ -11,9 +11,9 @@
 #include<iostream>
 #include "vencoder.h"
 
-class C_h264enc
+class C_h264Enc
 {
-private:
+public:
     // 定义NAL单元类型的枚举
     enum NALUnitType {
         NAL_UNKNOWN = 0,
@@ -30,8 +30,8 @@ public:
         virtual int OnOutputH264(unsigned char* data, unsigned int dataLen) = 0;
     };
 public:
-    C_h264enc(C_Listener* pListener, unsigned int srcWight, unsigned int srcHight, unsigned int dstWidth, unsigned int dstHeight);
-    ~C_h264enc();
+    C_h264Enc(C_Listener* pListener, unsigned int srcWight, unsigned int srcHight, unsigned int dstWidth, unsigned int dstHeight);
+    ~C_h264Enc();
     //输入NV21采集数据
     int InputData(unsigned char* inputData);
     //强制编码一帧关键帧，此处进行标记，实际在送数据时进行控制强制I帧
@@ -40,9 +40,15 @@ public:
         m_forceIframe = true;
     }
     
-private:
     // 判断NAL单元类型
-    NALUnitType getNALType(unsigned char* data, unsigned int dataLen);
+    static NALUnitType GetNALType(unsigned char* data, unsigned int dataLen);
+
+    /******************************************************************************
+    * 功  能：获取一个h.264 nalu
+    * 参  数：buffer - 目标缓冲区
+    * 返回值：返回错误码或nalu长度
+    ******************************************************************************/
+    static int get_h264_nalu(unsigned char  *buffer, unsigned length);
 
 private:
     C_Listener* m_pListener;
