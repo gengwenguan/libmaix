@@ -100,12 +100,12 @@ int C_ClientConnect::RecvCtrlMesssage(char* pData, unsigned int nLen)
             }
             m_sendFile.close();
             --m_fileMapIter;
+            m_sendFileSize = GetFileSize(m_fileMapIter->first);
             m_sendFile.open(m_fileMapIter->first.c_str(), std::ios::binary);
-            CLOG_INF("jump to the previous file<%s>!\n", m_fileMapIter->first.c_str());
+            CLOG_INF("jump to the previous file<%s> m_fileMap.size<%d>!\n", m_fileMapIter->first.c_str(), m_fileMap.size());
         }else{
             CLOG_ERR("jump to the previous file m_sendFile == NULL!\n");
         }
-
     }else if(message == 105){ // 105为下一个文件
         if(m_sendFile){
             if(++m_fileMapIter == m_fileMap.end()){
@@ -114,6 +114,7 @@ int C_ClientConnect::RecvCtrlMesssage(char* pData, unsigned int nLen)
                 return -1;
             }
             m_sendFile.close();
+            m_sendFileSize = GetFileSize(m_fileMapIter->first);
             m_sendFile.open(m_fileMapIter->first.c_str(), std::ios::binary);
             CLOG_INF("jump to the next file<%s>!\n", m_fileMapIter->first.c_str());
         }else{

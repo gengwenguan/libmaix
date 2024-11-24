@@ -15,7 +15,8 @@
 #include"logAdapt.h"
 
 C_FileMng::C_FileMng()
-    :m_bRunFlag(true),
+    :m_fileSize(0),
+    m_bRunFlag(true),
     m_pThread( new std::thread( [this]() { this->Accept(); }) )
 {
     //要先确保存放视频的文件夹存在
@@ -32,6 +33,7 @@ C_FileMng::C_FileMng()
         }
     }
 
+    std::lock_guard<std::mutex> lock(m_fileMapMutex);
     struct dirent *entry = nullptr;
     while ((entry = readdir(dir)) != nullptr) // 遍历目录下所有文件
     {
@@ -40,9 +42,13 @@ C_FileMng::C_FileMng()
             std::string fileName = entry->d_name;
             std::string filePath = std::string(kFileDir) + fileName;
 
-            //将目录下原本就存在的文件大小信息放入文件map中
-            std::lock_guard<std::mutex> lock(m_fileMapMutex);
-            m_fileMap[filePath] = GetFileSize(filePath);
+            unsigned int fileSize =  GetFileSize(filePath);
+            if(fileSize > 1024){
+                //将目录下原本就存在的文件大小信息放入文件map中，忽略过小文件
+                m_fileMap[filePath] = fileSize;
+            }else{
+                remove(filePath.c_str());  //删除较小的文件
+            }
         }
     }
     closedir(dir); // 关闭目录
@@ -53,21 +59,16 @@ C_FileMng::C_FileMng()
     //构造时先创建出来写入文件对象
     m_outFile.open(filePath.c_str(), std::ios::out | std::ios::binary);
 
-    {
-        //将新创建的文件放入管理map中
-        std::lock_guard<std::mutex> lock(m_fileMapMutex);
-        m_fileMap[filePath] = 0;
-        //保证文件数量在最大限制之内,在没有回放客户端连接同时文件数量超过限制时才对过期文件进行删除
-        while(m_fdConnections.size() == 0 && m_fileMap.size() > kMaxFileNum){
-            std::string needRemoveFile = m_fileMap.begin()->first;
-            remove(needRemoveFile.c_str());  //删除实际的文件
-            m_fileMap.erase(needRemoveFile); //删除管理map中的文件
-        }
+    //将新创建的文件放入管理map中
+    m_fileMap[filePath] = 0;
+    //保证文件数量在最大限制之内,在没有回放客户端连接同时文件数量超过限制时才对过期文件进行删除
+    while(m_fdConnections.size() == 0 && m_fileMap.size() > kMaxFileNum){
+        std::string needRemoveFile = m_fileMap.begin()->first;
+        remove(needRemoveFile.c_str());  //删除实际的文件
+        m_fileMap.erase(needRemoveFile); //删除管理map中的文件
     }
 
     CLOG_INF("m_outFile.open =  %d!\n", m_outFile.is_open());
-
-
 }
 
 C_FileMng::~C_FileMng()
@@ -96,15 +97,15 @@ void C_FileMng::InputFileData(unsigned char* data, unsigned int dataLen)
         m_fileSize += dataLen;
         //文件达到最大内存限制时进行关闭，重新创建一个新文件
         if(m_fileSize >= kMaxFileSize){
+            std::lock_guard<std::mutex> lock(m_fileMapMutex);
             m_outFile.close();
             m_fileSize = 0;
-            {
-                std::lock_guard<std::mutex> lock(m_fileMapMutex);
-                //更新最后一个文件大小
-                if(m_fileMap.size() > 0){
-                    std::string needRefreshFile = m_fileMap.rbegin()->first;
-                    m_fileMap[needRefreshFile] = GetFileSize(needRefreshFile);
-                }
+
+            //更新最后一个文件大小
+            if(m_fileMap.size() > 0){
+                std::string needRefreshFile = m_fileMap.rbegin()->first;
+                m_fileMap[needRefreshFile] = GetFileSize(needRefreshFile);
+                CLOG_INF("needRefreshFile = %s, size = %d!\n", needRefreshFile.c_str(), m_fileMap[needRefreshFile]);
             }
 
             //生成新得到文件路径名
@@ -114,16 +115,14 @@ void C_FileMng::InputFileData(unsigned char* data, unsigned int dataLen)
             //新创建并打开一个文件
             m_outFile.open(filePath.c_str(), std::ios::out | std::ios::binary);
 
-            {
-                //将新创建的文件放入管理map中
-                std::lock_guard<std::mutex> lock(m_fileMapMutex);
-                m_fileMap[filePath] = 0;
-                //保证文件数量在最大限制之内,在没有回放客户端连接同时文件数量超过限制时才对过期文件进行删除
-                while(m_fdConnections.size() == 0 && m_fileMap.size() > kMaxFileNum){
-                    std::string needRemoveFile = m_fileMap.begin()->first;
-                    remove(needRemoveFile.c_str());  //删除实际的文件
-                    m_fileMap.erase(needRemoveFile); //删除管理map中的文件
-                }
+            //将新创建的文件放入管理map中
+            m_fileMap[filePath] = 0;
+            //保证文件数量在最大限制之内,在没有回放客户端连接同时文件数量超过限制时才对过期文件进行删除
+            while(m_fdConnections.size() == 0 && m_fileMap.size() > kMaxFileNum){
+                std::string needRemoveFile = m_fileMap.begin()->first;
+                remove(needRemoveFile.c_str());  //删除实际的文件
+                m_fileMap.erase(needRemoveFile); //删除管理map中的文件
+                CLOG_INF("needRemoveFile = %s\n", needRemoveFile.c_str());
             }
 
         }
