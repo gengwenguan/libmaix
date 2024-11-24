@@ -11,7 +11,7 @@
 #include "libmaix_cam.h"
 #include "libmaix_disp.h"
 #include "h264Enc.h"
-#include "tcpserver.h"
+#include "tcpServer.h"
 #include "fileMng.h"
 
 

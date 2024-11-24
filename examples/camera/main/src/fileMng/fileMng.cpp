@@ -53,8 +53,17 @@ C_FileMng::C_FileMng()
     //构造时先创建出来写入文件对象
     m_outFile.open(filePath.c_str(), std::ios::out | std::ios::binary);
 
-    std::lock_guard<std::mutex> lock(m_fileMapMutex);
-    m_fileMap[filePath] = 0;
+    {
+        //将新创建的文件放入管理map中
+        std::lock_guard<std::mutex> lock(m_fileMapMutex);
+        m_fileMap[filePath] = 0;
+        //保证文件数量在最大限制之内,在没有回放客户端连接同时文件数量超过限制时才对过期文件进行删除
+        while(m_fdConnections.size() == 0 && m_fileMap.size() > kMaxFileNum){
+            std::string needRemoveFile = m_fileMap.begin()->first;
+            remove(needRemoveFile.c_str());  //删除实际的文件
+            m_fileMap.erase(needRemoveFile); //删除管理map中的文件
+        }
+    }
 
     CLOG_INF("m_outFile.open =  %d!\n", m_outFile.is_open());
 
@@ -154,19 +163,16 @@ int C_FileMng::Accept(){
     CLOG_INF("Server listening on port %d\n", kFileMngPort);
 
     fd_set read_fds;
-
+    FD_ZERO(&read_fds);
+    FD_SET(m_server_fd, &read_fds);
     while(m_bRunFlag){
-        FD_ZERO(&read_fds);
-        FD_SET(m_server_fd, &read_fds);
+        fd_set tmp_fds = read_fds;
         int max_fd = m_server_fd;
         // 将所有客户端套接字添加到文件描述符集
         {
             std::lock_guard<std::mutex> lock(m_oMutex);
             for (auto& item : m_fdConnections) {
                 int fd = item.first;
-                if (fd > 0) {
-                    FD_SET(fd, &read_fds);
-                }
                 if (fd > max_fd) {
                     max_fd = fd;
                 }
@@ -176,7 +182,7 @@ int C_FileMng::Accept(){
         timeval tm{};
         tm.tv_sec = 1;
         tm.tv_usec =0;
-        int ret = select(max_fd + 1, &read_fds, NULL, NULL, &tm);
+        int ret = select(max_fd + 1, &tmp_fds, NULL, NULL, &tm);
         if (ret < 0) {
             CLOG_ERR("select ret=%d\n", ret);
         } else if (ret == 0) { //超时
@@ -184,14 +190,15 @@ int C_FileMng::Accept(){
         }
 
         //服务器接收到新的连接
-        if (FD_ISSET(m_server_fd, &read_fds)) {
+        if (FD_ISSET(m_server_fd, &tmp_fds)) {
             int new_socket;
-            // 接受连接
+            // 接收连接
             if ((new_socket = accept(m_server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
                 CLOG_ERR("accept failed\n");
             }else{
                 std::lock_guard<std::mutex> lock(m_oMutex);
                 CLOG_INF("accept new socket:%d\n", new_socket);
+                FD_SET(new_socket, &read_fds);
                 m_fdConnections[new_socket] = std::unique_ptr<C_ClientConnect>(new C_ClientConnect(new_socket, m_fileMap, m_fileMapMutex));
             }
         }
@@ -200,19 +207,21 @@ int C_FileMng::Accept(){
             std::lock_guard<std::mutex> lock(m_oMutex);
             //收到某条客户端连接发来的消息
             char buffer[1024];
-            for(auto iter = m_fdConnections.begin(); iter != m_fdConnections.end(); iter++){
+            for(auto iter = m_fdConnections.begin(); iter != m_fdConnections.end(); ){
                 int fd = iter->first;
-                if(FD_ISSET(fd, &read_fds)){
-                    if (read(fd, buffer, 1024) <= 0) {
+                if(FD_ISSET(fd, &tmp_fds)){
+                    if (recv(fd, buffer, 1024, MSG_NOSIGNAL) <= 0) {
                         // 客户端断开连接
                         close(fd);
-                        CLOG_INF("Close socket:%d\n", fd);
+                        FD_CLR(fd, &read_fds);
                         iter = m_fdConnections.erase(iter);
+                        CLOG_INF("Close socket:%d m_fdConnections.size()=%d\n", fd, m_fdConnections.size());
                         continue;
                     } else {
                         // 处理接收到的消息
                     }
                 }
+                iter++; //迭代器递增放在尾部，以便上面的continue语句可以跳过
             }
         }
 
@@ -237,44 +246,6 @@ std::string C_FileMng::GenerateFilePathByNowTime()
     sprintf(path, "%s%d_%02d_%02d_%02d-%02d-%02d.264", kFileDir, 1900 + p->tm_year, 1 + p->tm_mon, p->tm_mday, p->tm_hour, p->tm_min, p->tm_sec); // 把格式化的时间写入字符数组中
 
     return std::string(path);
-}
-
-// 只保留目录下最新创建的n个文件，其余文件全部删除
-void C_FileMng::KeepLatestFiles()
-{
-    DIR *dir = opendir(kFileDir); // 打开目录
-    if (dir == nullptr)
-    {
-        CLOG_ERR("Failed to open %s\n", kFileDir);
-        return;
-    }
-
-    struct dirent *entry = nullptr;
-    std::vector<std::string> fileNames; // 定义文件列表，保存文件名和最后修改时间
-
-    while ((entry = readdir(dir)) != nullptr) // 遍历目录下所有文件
-    {
-        if (entry->d_type == DT_REG) // 如果是普通文件
-        {
-            std::string filename = entry->d_name;
-            fileNames.push_back(filename);
-        }
-    }
-
-    closedir(dir); // 关闭目录
-
-    if(fileNames.size() <= kMaxFileNum) return; //文件数量没达到上限时不需要删除
-
-    std::sort(fileNames.begin(), fileNames.end());
-
-    for (size_t i = 0; i < fileNames.size() - kMaxFileNum; i++) // 删除多余文件
-    {
-        std::string filePath = std::string(kFileDir) + fileNames[i];
-        if (remove(filePath.c_str()) != 0)
-        {
-            CLOG_ERR("Failed to delete file: ", filePath.c_str());
-        }
-    }
 }
 
 //获取文件大小

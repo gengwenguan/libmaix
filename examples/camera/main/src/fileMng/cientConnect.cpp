@@ -30,6 +30,9 @@ C_ClientConnect::~C_ClientConnect()
     if(m_pThread != nullptr){
         m_pThread->join();
     }
+    if(m_sendFile.is_open()){
+        m_sendFile.close();
+    }
     CLOG_ERR("this=%p m_sockeFd=%d\n", this, m_sockeFd);
 }
 
@@ -108,6 +111,8 @@ void C_ClientConnect::SendFileData()
                                 std::this_thread::sleep_for(std::chrono::milliseconds(30));
                                 //如果NALU是一帧正常帧数据时延时30ms，保证文件发送速率接近30fps
                             }
+                        }else{
+                            CLOG_ERR("NalType == NAL_UNKNOWN\n");
                         }
                         //发送完毕时清除该NALU单元
                         nalBuffer.clear();

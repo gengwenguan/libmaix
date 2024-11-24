@@ -35,8 +35,6 @@ private:
     int Accept();
     //根据当前时间生成文件名
     std::string GenerateFilePathByNowTime();
-    //保证文件数量在限制最大数量以内
-    void KeepLatestFiles();
     //获取文件大小
     unsigned int GetFileSize(std::string filePath);
 private:
