@@ -12,11 +12,13 @@ C_ClientConnect::C_ClientConnect(int socketFd, std::map<std::string, unsigned in
     :m_sockeFd(socketFd),
     m_fileMapMutex(fileMapMutex),
     m_fileMap(fileMap),
-    m_fileMapIter(fileMap.begin()),
+    m_fileMapIter(m_fileMap.begin()),
     m_sendFile(m_fileMapIter->first.c_str(), std::ios::binary),
     m_sendFileSize(m_fileMapIter->second),
+    m_progress(0),
     m_bRunFlag(true),
-    m_pThread( new std::thread( [this]() { this->SendFileData(); }) )
+    m_pThread( new std::thread( [this]() { this->SendFileData(); }) ),
+    m_bNeedIframe(false)
 {
     CLOG_INF("m_fileMapIter->first.c_str()=%s m_sendFileSize=%d m_sendFile.is_open()=%d\n", m_fileMapIter->first.c_str(), m_sendFileSize, m_sendFile.is_open());
     //当文件大小为0时尝试重新获取文件大小
@@ -36,14 +38,105 @@ C_ClientConnect::~C_ClientConnect()
     CLOG_ERR("this=%p m_sockeFd=%d\n", this, m_sockeFd);
 }
 
+//接收到取流端发来的控制消息：进度条拖动、快进、快退、上一个文件、下一个文件
+int C_ClientConnect::RecvCtrlMesssage(char* pData, unsigned int nLen)
+{
+    //仅只支持控制消息长度为一
+    if(nLen != 1){
+        CLOG_ERR("only support nLen == 1, nLen(%d)\n", nLen);
+        return -1;
+    }
+
+    std::lock_guard<std::mutex> lock(m_fileMapMutex);
+    unsigned char message = pData[0];
+    CLOG_INF("m_sockeFd(%d) recv message(%d)\n", m_sockeFd, message);
+
+    //0~100区间的消息为进度条进度,调整播放位置
+    if(message >= 0 && message <= 100){
+        m_bNeedIframe = true;
+        //先更新文件大小
+        m_sendFileSize = GetFileSize(m_fileMapIter->first);
+        //要调整的偏移位置
+        int offset = m_sendFileSize / 100 * message;
+        //偏移到指定位置
+        m_sendFile.seekg(offset, std::ios::beg);
+        CLOG_INF("seek to <%d>!\n", offset);
+
+    }else if(message == 101){ // 101为快退
+        m_bNeedIframe = true;
+        //先更新文件大小
+        m_sendFileSize = GetFileSize(m_fileMapIter->first);
+        //要调整的偏移位置
+        int offset = m_sendFileSize / kJumpPercentage;
+        //防止偏移越界
+        std::streampos currentPos = m_sendFile.tellg();
+        if(offset > currentPos){
+            m_sendFile.seekg(0, std::ios::beg); //偏移超过文件开头时限制在开头
+            CLOG_INF("Fast back to head m_sendFileSize<%d>!\n", offset, m_sendFileSize);
+        }else{
+            m_sendFile.seekg(-offset, std::ios::cur);
+            CLOG_INF("Fast back offset<%d> m_sendFileSize<%d>!\n", offset, m_sendFileSize);
+        }
+    }else if(message == 102){ // 102为快进
+            m_bNeedIframe = true;
+        //先更新文件大小
+        m_sendFileSize = GetFileSize(m_fileMapIter->first);
+        //要调整的偏移位置
+        int offset = m_sendFileSize / kJumpPercentage;
+        //防止偏移越界
+        std::streampos currentPos = m_sendFile.tellg();
+        if(offset + currentPos > m_sendFileSize){
+            m_sendFile.seekg(0, std::ios::end); //偏移超过文件开头时限制在开头
+            CLOG_INF("Fast forward to file end!\n");
+        }else{
+            m_sendFile.seekg(offset, std::ios::cur);
+            CLOG_INF("Fast forward offset<%d> m_sendFileSize<%d>!\n", offset, m_sendFileSize);
+        }
+    }else if(message == 104){ // 104为上一个文件
+        if(m_sendFile){
+            if(m_fileMapIter == m_fileMap.begin()){
+                CLOG_ERR("m_fileMapIter == m_fileMap.begin()!, cannot jump to the previous file!\n");
+                return -1;
+            }
+            m_sendFile.close();
+            --m_fileMapIter;
+            m_sendFile.open(m_fileMapIter->first.c_str(), std::ios::binary);
+            CLOG_INF("jump to the previous file<%s>!\n", m_fileMapIter->first.c_str());
+        }else{
+            CLOG_ERR("jump to the previous file m_sendFile == NULL!\n");
+        }
+
+    }else if(message == 105){ // 105为下一个文件
+        if(m_sendFile){
+            if(++m_fileMapIter == m_fileMap.end()){
+                CLOG_ERR("m_fileMapIter next is m_fileMap.end(), This time the control failed!\n");
+                m_fileMapIter--;
+                return -1;
+            }
+            m_sendFile.close();
+            m_sendFile.open(m_fileMapIter->first.c_str(), std::ios::binary);
+            CLOG_INF("jump to the next file<%s>!\n", m_fileMapIter->first.c_str());
+        }else{
+            CLOG_ERR("jump to the next file m_sendFile == NULL!\n");
+        }
+    }else{
+        CLOG_ERR("Unsupport message(%d)\n", message);
+        return -1;
+    }
+    return 0;
+}
+
 //向客户端通过网络发送NAL数据
 int C_ClientConnect::SendNal(char* pData, unsigned int nLen)
 {
-    // 转换整数的字节序为网络字节序
-    int networkNumber = htonl(nLen);
+    // 转换整数的字节序为网络字节序,长度加一，前方增加一个字节视频播放的进度信息
+    int networkNumber = htonl(nLen+1);
     //先将一帧H264数据的长度发送给客户端，长度为4个字节
     int ret = send(m_sockeFd, &networkNumber, sizeof(networkNumber), MSG_NOSIGNAL);
     if(ret>0){
+        //先将一字节视频播放进度信息发送给客户端
+        char byte = (char)m_progress;
+        send(m_sockeFd, &byte, 1, MSG_NOSIGNAL);
         //再将实际的H264数据发送给客户端
         ret = send(m_sockeFd, pData, nLen, MSG_NOSIGNAL);
     }
@@ -72,23 +165,32 @@ void C_ClientConnect::SendFileData()
     std::vector<char> nalBuffer;             //完整NAL单元缓冲区
     while(m_bRunFlag){
 
-        if(!m_sendFile){
-            m_sendFile.close();  //某个文件读取到末尾了关闭该文件，打开下一个文件，让客户端依次播放录制的视频文件
-            {
-                std::lock_guard<std::mutex> lock(m_fileMapMutex);
-                if(++m_fileMapIter == m_fileMap.end()){
-                    CLOG_ERR("Failed m_fileMapIter == m_fileMap.end() , exit!\n");
-                    return;
+        std::vector<char> buffer(kTmpBuffSize);
+        std::streamsize bytesRead;
+        {
+            std::lock_guard<std::mutex> lock(m_fileMapMutex);
+            if(m_sendFile.eof()){
+                m_sendFile.close();  //某个文件读取到末尾了关闭该文件，打开下一个文件，让客户端依次播放录制的视频文件
+                {
+                    //最后一个文件也播放完毕时跳回到第一个文件
+                    if(++m_fileMapIter == m_fileMap.end()){
+                        CLOG_ERR("Failed m_fileMapIter == m_fileMap.end() , goto first file!\n");
+                        m_fileMapIter = m_fileMap.begin();
+                    }
                 }
+                m_sendFile.open(m_fileMapIter->first.c_str(), std::ios::binary);
+                CLOG_INF("Play the next file<%s>!\n", m_fileMapIter->first.c_str());
             }
-            m_sendFile.open(m_fileMapIter->first.c_str(), std::ios::binary);
-        }
 
-        //文件中读取部分数据
-        std::vector<char> buffer(kTmpBuffSize);        
-        m_sendFile.read(buffer.data(), kTmpBuffSize);
-        std::streamsize bytesRead = m_sendFile.gcount();
-        //CLOG_ERR("bytesRead%d\n", bytesRead);
+            //文件中读取部分数据
+            m_sendFile.read(buffer.data(), kTmpBuffSize);
+            bytesRead = m_sendFile.gcount();
+            std::streampos currentPos = m_sendFile.tellg();
+            m_progress = (int)((double)currentPos / m_sendFileSize * 100);
+            m_progress = std::min(m_progress, 100);
+        }
+         //CLOG_INF("m_progress = %d!\n", m_progress);
+
 
         if (bytesRead > 0) {
             //调整缓冲区为实际读取数据大小
@@ -103,14 +205,23 @@ void C_ClientConnect::SendFileData()
                     //找到了下一个NALU单元的起始码，同时nalBuffer中有数据时说明找到了一帧完整的NALU单元
                     if(!nalBuffer.empty()){
                         C_h264Enc::NALUnitType NalType = C_h264Enc::GetNALType((unsigned char*)nalBuffer.data(), nalBuffer.size());
+                        //CLOG_ERR("NalType=%d\n", NalType);
                         //发送一个完整的NALU单元
                         if(NalType != C_h264Enc::NAL_UNKNOWN){
-                            //是一个正常的NALU单元数据时发送该NALU给对应的客户端
-                            SendNal(nalBuffer.data(), nalBuffer.size());
-                            if(NalType == C_h264Enc::NAL_IDR_PICTURE || NalType == C_h264Enc::NAL_SLICE){
-                                std::this_thread::sleep_for(std::chrono::milliseconds(30));
-                                //如果NALU是一帧正常帧数据时延时30ms，保证文件发送速率接近30fps
+                            if(m_bNeedIframe && NalType != C_h264Enc::NAL_IDR_PICTURE){
+                                //需要关键帧的时候不是spp的NAL跳过，避免终端预览时花屏
+                                CLOG_WRN("m_bNeedIframe, not sps, skip this NAL\n");
+                            }else{
+                                //是一个正常的NALU单元数据时发送该NALU给对应的客户端
+                                SendNal(nalBuffer.data(), nalBuffer.size());
+                                if(NalType == C_h264Enc::NAL_IDR_PICTURE || NalType == C_h264Enc::NAL_SLICE){
+                                    //如果NALU是一帧正常帧数据时延时30ms，保证文件发送速率接近30fps,视频快进时m_IntervalMs会变小
+                                    std::this_thread::sleep_for(std::chrono::milliseconds(int(kIntervalMs)));
+                                }
+                                if(m_bNeedIframe && NalType == C_h264Enc::NAL_IDR_PICTURE)
+                                    m_bNeedIframe = false;  //发送sps后续不需要I帧
                             }
+
                         }else{
                             CLOG_ERR("NalType == NAL_UNKNOWN\n");
                         }

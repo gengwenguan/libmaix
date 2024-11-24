@@ -205,12 +205,13 @@ int C_FileMng::Accept(){
 
         {
             std::lock_guard<std::mutex> lock(m_oMutex);
-            //收到某条客户端连接发来的消息
-            char buffer[1024];
+            //收到某条客户端连接发来的消息,目前预览端的控制消息长度为一个字节
+            char buffer[1];
             for(auto iter = m_fdConnections.begin(); iter != m_fdConnections.end(); ){
                 int fd = iter->first;
                 if(FD_ISSET(fd, &tmp_fds)){
-                    if (recv(fd, buffer, 1024, MSG_NOSIGNAL) <= 0) {
+                    int ret = recv(fd, buffer, 1, MSG_NOSIGNAL);
+                    if (ret <= 0) {
                         // 客户端断开连接
                         close(fd);
                         FD_CLR(fd, &read_fds);
@@ -219,6 +220,7 @@ int C_FileMng::Accept(){
                         continue;
                     } else {
                         // 处理接收到的消息
+                        iter->second->RecvCtrlMesssage(buffer, ret);
                     }
                 }
                 iter++; //迭代器递增放在尾部，以便上面的continue语句可以跳过

@@ -92,6 +92,9 @@ int C_h264Enc::InputData(unsigned char* inputData)
         // 强制编码器编I帧
         VideoEncSetParameter(m_pVideoEnc, VENC_IndexParamForceKeyFrame, &value);
         m_forceIframe = false;
+        //sps pps信息
+        VideoEncGetParameter(m_pVideoEnc, VENC_IndexParamH264SPSPPS, &m_sps_pps_data);
+        m_pListener->OnOutputH264(m_sps_pps_data.pBuffer, m_sps_pps_data.nLength);
     }
 
     GetOneAllocInputBuffer(m_pVideoEnc, &m_inputBuffer);
@@ -108,12 +111,6 @@ int C_h264Enc::InputData(unsigned char* inputData)
 
     if(-1 != ret)
     {
-        //编码出的h264数据如果是IDR帧则在帧前增加sps，pps信息，这样可以让保存的h264文件在在跳转到任意I帧位置解码播放
-        if(GetNALType(m_outputBuffer.pData0, m_outputBuffer.nSize0) == NAL_IDR_PICTURE){
-            //创建文件后将sps pps信息写入文件
-            VideoEncGetParameter(m_pVideoEnc, VENC_IndexParamH264SPSPPS, &m_sps_pps_data);
-            m_pListener->OnOutputH264(m_sps_pps_data.pBuffer, m_sps_pps_data.nLength);
-        }
         //回调编码出的h264数据,
         m_pListener->OnOutputH264(m_outputBuffer.pData0, m_outputBuffer.nSize0);
         if (m_outputBuffer.nSize1)
