@@ -5,21 +5,23 @@
   
   在libmax的examples/camera例程中为监控摄像头实现，实现功能包括：
   
-    1.M2dock开发版采集视频渲染到自带小屏幕上
+      1.M2dock开发版采集视频渲染到自带小屏幕上
+        
+      2.M2dock开发版采集视频编码为h264后存储到本地，多文件循环存储，自动删除过期文件
       
-    2.M2dock开发版采集视频编码为h264后存储到本地，多文件循环存储，自动删除过期文件
-    
-    3.安卓端程序或windows端时时预览M2dock采集画面
-    
-    4.安卓端程序或windows端时回放M2dock开发版保存的h264文件、回复功能包括：播放进度条任意拖动、视频快进快退、上一个文件下一个文件切换
+      3.安卓端程序或windows端时时预览M2dock采集画面
+      
+      4.安卓端程序或windows端时回放M2dock开发版保存的h264文件、回复功能包括：播放进度条任意拖动、视频快进快退、上一个文件下一个文件切换
+
+      5.支持多设备同时预览和回放
 
 * 各端项目地址
   
-  M2dock监控摄像头功能主要逻辑代码链接https://github.com/gengwenguan/libmaix/tree/release/examples/camera
-  
-  安卓工程链接https://github.com/gengwenguan/Mynative
-  
-  windows工程链接https://github.com/gengwenguan/winRender
+    M2dock监控摄像头功能主要逻辑代码链接https://github.com/gengwenguan/libmaix/tree/release/examples/camera
+    
+    安卓工程链接https://github.com/gengwenguan/Mynative
+    
+    windows工程链接https://github.com/gengwenguan/winRender
 
 * 效果图片
   
