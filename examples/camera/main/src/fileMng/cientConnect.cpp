@@ -6,7 +6,7 @@
 #include <netinet/in.h>
 #include"h264Enc.h"
 #include"clientConnect.h"
-#include"logAdapt.h"
+
 
 C_ClientConnect::C_ClientConnect(int socketFd, std::map<std::string, unsigned int>& fileMap, std::mutex& fileMapMutex)
     :m_sockeFd(socketFd),
@@ -21,7 +21,9 @@ C_ClientConnect::C_ClientConnect(int socketFd, std::map<std::string, unsigned in
     m_bNeedIframe(false),
     m_IntervalMs(kIntervalDefaultMs)
 {
-    CLOG_INF("m_fileMapIter->first.c_str()=%s m_sendFileSize=%d m_sendFile.is_open()=%d\n", m_fileMapIter->first.c_str(), m_sendFileSize, m_sendFile.is_open());
+    //设置日志输出的key
+    GetLogKey() << "socketFd:" << m_sockeFd;
+    NLOG_INF("m_fileMapIter->first.c_str()=%s m_sendFileSize=%d m_sendFile.is_open()=%d\n", m_fileMapIter->first.c_str(), m_sendFileSize, m_sendFile.is_open());
     //当文件大小为0时尝试重新获取文件大小
     if(m_sendFileSize == 0)
         m_sendFileSize = GetFileSize(m_fileMapIter->first);
@@ -36,7 +38,7 @@ C_ClientConnect::~C_ClientConnect()
     if(m_sendFile.is_open()){
         m_sendFile.close();
     }
-    CLOG_ERR("this=%p m_sockeFd=%d\n", this, m_sockeFd);
+    NLOG_ERR("this=%p \n", this);
 }
 
 //接收到取流端发来的控制消息：进度条拖动、快进、快退、上一个文件、下一个文件
@@ -44,13 +46,13 @@ int C_ClientConnect::RecvCtrlMesssage(char* pData, unsigned int nLen)
 {
     //仅只支持控制消息长度为一
     if(nLen != 1){
-        CLOG_ERR("only support nLen == 1, nLen(%d)\n", nLen);
+        NLOG_ERR("only support nLen == 1, nLen(%d)\n", nLen);
         return -1;
     }
 
     std::lock_guard<std::mutex> lock(m_fileMapMutex);
     unsigned char message = pData[0];
-    CLOG_INF("m_sockeFd(%d) recv message(%d)\n", m_sockeFd, message);
+    NLOG_INF("recv message(%d)\n", message);
 
     //0~100区间的消息为进度条进度,调整播放位置
     if(message >= 0 && message <= 100){
@@ -61,7 +63,7 @@ int C_ClientConnect::RecvCtrlMesssage(char* pData, unsigned int nLen)
         int offset = m_sendFileSize / 100 * message;
         //偏移到指定位置
         m_sendFile.seekg(offset, std::ios::beg);
-        CLOG_INF("seek to <%d>!\n", offset);
+        NLOG_INF("seek to <%d>!\n", offset);
 
     }else if(message == 101){ // 101为快退
         m_bNeedIframe = true;
@@ -73,10 +75,10 @@ int C_ClientConnect::RecvCtrlMesssage(char* pData, unsigned int nLen)
         std::streampos currentPos = m_sendFile.tellg();
         if(offset > currentPos){
             m_sendFile.seekg(0, std::ios::beg); //偏移超过文件开头时限制在开头
-            CLOG_INF("Fast back to head m_sendFileSize<%d>!\n", offset, m_sendFileSize);
+            NLOG_INF("Fast back to head m_sendFileSize<%d>!\n", offset, m_sendFileSize);
         }else{
             m_sendFile.seekg(-offset, std::ios::cur);
-            CLOG_INF("Fast back offset<%d> m_sendFileSize<%d>!\n", offset, m_sendFileSize);
+            NLOG_INF("Fast back offset<%d> m_sendFileSize<%d>!\n", offset, m_sendFileSize);
         }
     }else if(message == 102){ // 102为快进
             m_bNeedIframe = true;
@@ -88,47 +90,47 @@ int C_ClientConnect::RecvCtrlMesssage(char* pData, unsigned int nLen)
         std::streampos currentPos = m_sendFile.tellg();
         if(offset + currentPos > m_sendFileSize){
             m_sendFile.seekg(0, std::ios::end); //偏移超过文件开头时限制在开头
-            CLOG_INF("Fast forward to file end!\n");
+            NLOG_INF("Fast forward to file end!\n");
         }else{
             m_sendFile.seekg(offset, std::ios::cur);
-            CLOG_INF("Fast forward offset<%d> m_sendFileSize<%d>!\n", offset, m_sendFileSize);
+            NLOG_INF("Fast forward offset<%d> m_sendFileSize<%d>!\n", offset, m_sendFileSize);
         }
     }else if(message == 104){ // 104为上一个文件
         if(m_sendFile){
             if(m_fileMapIter == m_fileMap.begin()){
-                CLOG_ERR("m_fileMapIter == m_fileMap.begin()!, cannot jump to the previous file!\n");
+                NLOG_ERR("m_fileMapIter == m_fileMap.begin()!, cannot jump to the previous file!\n");
                 return -1;
             }
             m_sendFile.close();
             --m_fileMapIter;
             m_sendFileSize = GetFileSize(m_fileMapIter->first);
             m_sendFile.open(m_fileMapIter->first.c_str(), std::ios::binary);
-            CLOG_INF("jump to the previous file<%s> m_fileMap.size<%d>!\n", m_fileMapIter->first.c_str(), m_fileMap.size());
+            NLOG_INF("jump to the previous file<%s> m_fileMap.size<%d>!\n", m_fileMapIter->first.c_str(), m_fileMap.size());
         }else{
-            CLOG_ERR("jump to the previous file m_sendFile == NULL!\n");
+            NLOG_ERR("jump to the previous file m_sendFile == NULL!\n");
         }
     }else if(message == 105){ // 105为下一个文件
         if(m_sendFile){
             if(++m_fileMapIter == m_fileMap.end()){
-                CLOG_ERR("m_fileMapIter next is m_fileMap.end(), This time the control failed!\n");
+                NLOG_ERR("m_fileMapIter next is m_fileMap.end(), This time the control failed!\n");
                 m_fileMapIter--;
                 return -1;
             }
             m_sendFile.close();
             m_sendFileSize = GetFileSize(m_fileMapIter->first);
             m_sendFile.open(m_fileMapIter->first.c_str(), std::ios::binary);
-            CLOG_INF("jump to the next file<%s>!\n", m_fileMapIter->first.c_str());
+            NLOG_INF("jump to the next file<%s>!\n", m_fileMapIter->first.c_str());
         }else{
-            CLOG_ERR("jump to the next file m_sendFile == NULL!\n");
+            NLOG_ERR("jump to the next file m_sendFile == NULL!\n");
         }
     }else if(message == 107){ // 107为视频播放加速
         m_IntervalMs = kIntervalFastPlayMs;
-        CLOG_INF("Fast Forword start m_IntervalMs<%d>!\n", m_IntervalMs);
+        NLOG_INF("Fast Forword start m_IntervalMs<%d>!\n", m_IntervalMs);
     }else if(message == 108){ // 108为停止视频播放加速
         m_IntervalMs = kIntervalDefaultMs;
-        CLOG_INF("Fast Forword stop m_IntervalMs<%d>!\n", m_IntervalMs);
+        NLOG_INF("Fast Forword stop m_IntervalMs<%d>!\n", m_IntervalMs);
     }else{
-        CLOG_ERR("Unsupport message(%d)\n", message);
+        NLOG_ERR("Unsupport message(%d)\n", message);
         return -1;
     }
     return 0;
@@ -151,7 +153,7 @@ int C_ClientConnect::SendNal(char* pData, unsigned int nLen)
 
     if (ret <= 0) {
         // 发送失败
-        CLOG_ERR("send failed, socket:%d\n", m_sockeFd);
+        NLOG_ERR("send failed, socket:%d\n", m_sockeFd);
     }
     return ret;
 }
@@ -182,12 +184,12 @@ void C_ClientConnect::SendFileData()
                 {
                     //最后一个文件也播放完毕时跳回到第一个文件
                     if(++m_fileMapIter == m_fileMap.end()){
-                        CLOG_ERR("Failed m_fileMapIter == m_fileMap.end() , goto first file!\n");
+                        NLOG_ERR("Failed m_fileMapIter == m_fileMap.end() , goto first file!\n");
                         m_fileMapIter = m_fileMap.begin();
                     }
                 }
                 m_sendFile.open(m_fileMapIter->first.c_str(), std::ios::binary);
-                CLOG_INF("Play the next file<%s>!\n", m_fileMapIter->first.c_str());
+                NLOG_INF("Play the next file<%s>!\n", m_fileMapIter->first.c_str());
             }
 
             //文件中读取部分数据
@@ -197,7 +199,7 @@ void C_ClientConnect::SendFileData()
             m_progress = (int)((double)currentPos / m_sendFileSize * 100);
             m_progress = std::min(m_progress, 100);
         }
-         //CLOG_INF("m_progress = %d!\n", m_progress);
+         //NLOG_INF("m_progress = %d!\n", m_progress);
 
 
         if (bytesRead > 0) {
@@ -213,12 +215,12 @@ void C_ClientConnect::SendFileData()
                     //找到了下一个NALU单元的起始码，同时nalBuffer中有数据时说明找到了一帧完整的NALU单元
                     if(!nalBuffer.empty()){
                         C_h264Enc::NALUnitType NalType = C_h264Enc::GetNALType((unsigned char*)nalBuffer.data(), nalBuffer.size());
-                        //CLOG_ERR("NalType=%d\n", NalType);
+                        //NLOG_ERR("NalType=%d\n", NalType);
                         //发送一个完整的NALU单元
                         if(NalType != C_h264Enc::NAL_UNKNOWN){
                             if(m_bNeedIframe && NalType != C_h264Enc::NAL_IDR_PICTURE){
                                 //需要关键帧的时候不是spp的NAL跳过，避免终端预览时花屏
-                                CLOG_WRN("m_bNeedIframe, not sps, skip this NAL\n");
+                                NLOG_WRN("m_bNeedIframe, not IDR_PICTURE, skip this NAL\n");
                             }else{
                                 //是一个正常的NALU单元数据时发送该NALU给对应的客户端
                                 SendNal(nalBuffer.data(), nalBuffer.size());
@@ -231,7 +233,7 @@ void C_ClientConnect::SendFileData()
                             }
 
                         }else{
-                            CLOG_ERR("NalType == NAL_UNKNOWN\n");
+                            NLOG_ERR("NalType == NAL_UNKNOWN\n");
                         }
                         //发送完毕时清除该NALU单元
                         nalBuffer.clear();
@@ -265,87 +267,3 @@ unsigned int C_ClientConnect::GetFileSize(std::string filePath)
 
     return fileSize;
 }
-
-
-
-
-// int C_ClientConnect::get_h264_frame(unsigned char  *buffer, unsigned int length, H264_FRAME_INFO *frame_info)
-// {
-//     int pos = 0, ret;
-//     int bFindFrame = 0;
-//     int bFrameType = 0;
-//     unsigned int nal_type;
-//     frame_info->nalu_num = 0;
-
-//     if (nullptr == buffer || length <=4 )
-//     {
-//         CM_Log(LOG_LEVEL_INFO, "get_h264_frame length:%d",length);
-//         return -1;
-//     }
-
-//     //pos += ret;
-//     while(1)
-//     {
-//         int remainLength = length - pos;
-//         ret = get_h264_nalu(&buffer[pos], remainLength);
-//         if (ret < 0 )
-//         {
-//             return -1;
-//         }
-
-//         if((buffer[pos + 4] & 0x1F) == 5)
-//         {
-//             bFindFrame = 1;
-//             bFrameType = FRAME_TYPE_VIDEO_IFRAME;
-//         }
-
-//         if((buffer[pos + 4] & 0x1F) == 9
-//            || (buffer[pos + 4] & 0x1F) == 7 )
-//         {
-//             if( bFindFrame )
-//             {
-// //                fseek (fp_video_in, (-1 * ret), SEEK_CUR);
-//                 break;
-//             }
-//         }
-
-//         if((buffer[pos + 4] & 0x1F) == 1)
-//         {
-//             if(bFindFrame == 0)
-//             {
-//                 bFrameType = FRAME_TYPE_VIDEO_PFRAME;
-//                 bFindFrame = 1;
-//             }
-//             else
-//             {
-// //                fseek (fp_video_in, (-1 * ret), SEEK_CUR);
-//                 break;
-//             }
-//         }
-
-//         frame_info->nalu[frame_info->nalu_num].nalu_ptr = &buffer[pos];
-//         frame_info->nalu[frame_info->nalu_num].nalu_len = ret;
-//         frame_info->nalu_num++;
-//         pos += ret;
-
-//         if (pos >= length-1)
-//         {
-//             break;
-//         }
-//     }
-
-//     if (bFrameType == FRAME_TYPE_VIDEO_IFRAME)
-//     {
-//         frame_info->frame_type = FRAME_TYPE_VIDEO_IFRAME;
-
-//         CM_Log(LOG_LEVEL_INFO, "get_h264_frame I Frame");
-//     }
-//     else
-//     {
-//         frame_info->frame_type = FRAME_TYPE_VIDEO_PFRAME;
-
-//         CM_Log(LOG_LEVEL_INFO, "get_h264_frame P Frame");
-//     }
-
-//     return pos;
-// }

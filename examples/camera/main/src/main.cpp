@@ -102,7 +102,7 @@ std::string get_ipv4_address() {
 int main(int argc, char **argv)
 {
     CLOG_INF("main enter!\n");
-    std::this_thread::sleep_for(std::chrono::milliseconds(3000));  //启动时先等待一会让设备获取到ip地址和时间
+    std::this_thread::sleep_for(std::chrono::milliseconds(8000));  //启动时先等待一会让设备获取到ip地址和时间
     signal(SIGINT, app_handlesig);
     signal(SIGTERM, app_handlesig);
 

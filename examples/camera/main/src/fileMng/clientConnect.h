@@ -14,9 +14,10 @@
 #include <set>
 #include <map>
 #include <memory>
+#include"logAdapt.h"
 //#include <alsa/asoundlib.h>
 
-class C_ClientConnect
+class C_ClientConnect : public C_LogAdapt
 {
 private:
     static constexpr int kTmpBuffSize = 2048;      //临时缓冲区大小
