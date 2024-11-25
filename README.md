@@ -25,9 +25,9 @@
 
 * 效果图片
   
-![image](https://github.com/gengwenguan/libmaix/blob/release/%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_20241025010039.jpg)
-![image](https://github.com/gengwenguan/libmaix/blob/release/%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_20241025010048.jpg)
-![image](https://github.com/gengwenguan/winRender/blob/master/%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_20241117001815.jpg)
+    输入M2dock的ip地址后进行连接、安卓app的上方为预览窗口，下方为回放窗口、windows程序为预览窗口，回放功能待进一步开发。
+    
+![image](https://github.com/gengwenguan/libmaix/blob/release/jiankong.jpg)
 
 libmaix
 =========
