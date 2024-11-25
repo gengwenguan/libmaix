@@ -18,7 +18,8 @@ C_ClientConnect::C_ClientConnect(int socketFd, std::map<std::string, unsigned in
     m_progress(0),
     m_bRunFlag(true),
     m_pThread( new std::thread( [this]() { this->SendFileData(); }) ),
-    m_bNeedIframe(false)
+    m_bNeedIframe(false),
+    m_IntervalMs(kIntervalDefaultMs)
 {
     CLOG_INF("m_fileMapIter->first.c_str()=%s m_sendFileSize=%d m_sendFile.is_open()=%d\n", m_fileMapIter->first.c_str(), m_sendFileSize, m_sendFile.is_open());
     //当文件大小为0时尝试重新获取文件大小
@@ -120,6 +121,12 @@ int C_ClientConnect::RecvCtrlMesssage(char* pData, unsigned int nLen)
         }else{
             CLOG_ERR("jump to the next file m_sendFile == NULL!\n");
         }
+    }else if(message == 107){ // 107为视频播放加速
+        m_IntervalMs = kIntervalFastPlayMs;
+        CLOG_INF("Fast Forword start m_IntervalMs<%d>!\n", m_IntervalMs);
+    }else if(message == 108){ // 108为停止视频播放加速
+        m_IntervalMs = kIntervalDefaultMs;
+        CLOG_INF("Fast Forword stop m_IntervalMs<%d>!\n", m_IntervalMs);
     }else{
         CLOG_ERR("Unsupport message(%d)\n", message);
         return -1;
@@ -217,7 +224,7 @@ void C_ClientConnect::SendFileData()
                                 SendNal(nalBuffer.data(), nalBuffer.size());
                                 if(NalType == C_h264Enc::NAL_IDR_PICTURE || NalType == C_h264Enc::NAL_SLICE){
                                     //如果NALU是一帧正常帧数据时延时30ms，保证文件发送速率接近30fps,视频快进时m_IntervalMs会变小
-                                    std::this_thread::sleep_for(std::chrono::milliseconds(int(kIntervalMs)));
+                                    std::this_thread::sleep_for(std::chrono::milliseconds(m_IntervalMs));
                                 }
                                 if(m_bNeedIframe && NalType == C_h264Enc::NAL_IDR_PICTURE)
                                     m_bNeedIframe = false;  //发送sps后续不需要I帧
