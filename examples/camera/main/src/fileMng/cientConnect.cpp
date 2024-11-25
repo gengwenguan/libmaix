@@ -21,7 +21,7 @@ C_ClientConnect::C_ClientConnect(int socketFd, std::map<std::string, unsigned in
     m_bNeedIframe(false),
     m_IntervalMs(kIntervalDefaultMs)
 {
-    //设置日志输出的key
+    //设置日志输出的key，用于区分多个连接产生的打印
     GetLogKey() << "socketFd:" << m_sockeFd;
     NLOG_INF("m_fileMapIter->first.c_str()=%s m_sendFileSize=%d m_sendFile.is_open()=%d\n", m_fileMapIter->first.c_str(), m_sendFileSize, m_sendFile.is_open());
     //当文件大小为0时尝试重新获取文件大小

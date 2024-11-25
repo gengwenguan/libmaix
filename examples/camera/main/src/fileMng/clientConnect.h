@@ -17,6 +17,7 @@
 #include"logAdapt.h"
 //#include <alsa/asoundlib.h>
 
+//C_ClientConnect会创建多个对象，继承C_LogAdapt设置不同的key对多个对象的打印进行区分
 class C_ClientConnect : public C_LogAdapt
 {
 private:
