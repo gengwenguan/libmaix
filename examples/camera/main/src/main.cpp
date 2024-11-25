@@ -6,10 +6,7 @@
 #include <thread>
 #include <signal.h>
 #include <string>
-#include <ifaddrs.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>  // 包含这个头文件以确保 NI_MAXHOST 和 NI_NUMERICHOST 定义
+
 #include "libmaix_image.h"
 #include "libmaix_cam.h"
 #include "libmaix_disp.h"
@@ -60,44 +57,6 @@ static void app_handlesig(int signo)
   }
 }
 
-
-
-// 获取 IPv4 地址的接口
-std::string get_ipv4_address() {
-    struct ifaddrs *ifaddr, *ifa;
-    char host[NI_MAXHOST];
-    std::string ipv4_address = "0.0.0.0";
-
-    // 获取网络接口信息
-    if (getifaddrs(&ifaddr) == -1) {
-        perror("getifaddrs");
-        return "";
-    }
-
-    // 遍历所有网络接口
-    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
-        if (ifa->ifa_addr == NULL)
-            continue;
-
-        int family = ifa->ifa_addr->sa_family;
-
-        // 只处理 IPv4 地址
-        if (family == AF_INET) {
-            int s = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in), host, NI_MAXHOST, NULL, 0, NI_NUMERICHOST);
-            if (s != 0) {
-                std::cerr << "getnameinfo() failed: " << gai_strerror(s) << std::endl;
-                continue;
-            }
-            // 找到第一个 IPv4 地址并返回
-            ipv4_address = host;
-            if(ipv4_address == "127.0.0.1"){ continue; } //找到的为127.0.0.1本地回环地址跳过
-            break;
-        }
-    }
-
-    freeifaddrs(ifaddr); // 释放资源
-    return ipv4_address;
-}
 
 int main(int argc, char **argv)
 {
@@ -177,7 +136,7 @@ int main(int argc, char **argv)
 
         //将该设备的ip地址渲染到图片最上方
         cv::Mat gray(kCamInH, kCamInW, CV_8UC1, (unsigned char *)vir[0]);
-        cv::putText(gray, get_ipv4_address().c_str(), cv::Point(5, 30), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(255), 2);
+        cv::putText(gray, C_Terminal::get_ipv4_address().c_str(), cv::Point(5, 30), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(255), 2);
         //将日期时间渲染到图片最下方
         std::string strData = C_LogAdapt::GetCurrentDateTimeInChina(true);
         cv::putText(gray, strData.c_str(), cv::Point(5, kCamInH-5), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(255), 2);

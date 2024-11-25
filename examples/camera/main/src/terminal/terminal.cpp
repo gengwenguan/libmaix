@@ -1,4 +1,8 @@
 #include<iostream>
+#include <ifaddrs.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>  // 包含这个头文件以确保 NI_MAXHOST 和 NI_NUMERICHOST 定义
 #include"logAdapt.h"
 #include "terminal.h"
 
@@ -98,4 +102,41 @@ void C_Terminal::rgb888ToNv21(const unsigned char* rgb, unsigned char* nv21, int
             }
         }
     }
+}
+
+// 获取 IPv4 地址的接口
+std::string C_Terminal::get_ipv4_address() {
+    struct ifaddrs *ifaddr, *ifa;
+    char host[NI_MAXHOST];
+    std::string ipv4_address = "0.0.0.0";
+
+    // 获取网络接口信息
+    if (getifaddrs(&ifaddr) == -1) {
+        perror("getifaddrs");
+        return "";
+    }
+
+    // 遍历所有网络接口
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL)
+            continue;
+
+        int family = ifa->ifa_addr->sa_family;
+
+        // 只处理 IPv4 地址
+        if (family == AF_INET) {
+            int s = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in), host, NI_MAXHOST, NULL, 0, NI_NUMERICHOST);
+            if (s != 0) {
+                std::cerr << "getnameinfo() failed: " << gai_strerror(s) << std::endl;
+                continue;
+            }
+            // 找到第一个 IPv4 地址并返回
+            ipv4_address = host;
+            if(ipv4_address == "127.0.0.1"){ continue; } //找到的为127.0.0.1本地回环地址跳过
+            break;
+        }
+    }
+
+    freeifaddrs(ifaddr); // 释放资源
+    return ipv4_address;
 }

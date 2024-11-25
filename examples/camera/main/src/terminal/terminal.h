@@ -28,6 +28,9 @@ public:
     //送人采集数据
     int InputNv21(unsigned char* inputData);
 
+    //获取设备的ipv4地址
+    static std::string get_ipv4_address();
+
 private:
     //rgb888转Nv21格式
     void rgb888ToNv21(const unsigned char* rgb, unsigned char* nv21, int width, int height);
