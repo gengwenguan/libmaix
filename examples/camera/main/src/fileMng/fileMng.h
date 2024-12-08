@@ -22,9 +22,17 @@ private:
     static constexpr const char* kFileDir = "video/";       //存放保存视频文件的路径
     static constexpr int kMaxFileNum = 10;                  //最多保存的文件数量
     static constexpr unsigned int kMaxFileSize =  1024 * 1024 * 1024; //每个文件最大容量1G
-    static constexpr int kFileMngPort  = 56060;             //文件管理服务监听端口监听端口
+    static constexpr int kFileMngPort  = 56060;             //文件管理服务监听端口
 public:
-    C_FileMng();
+    class C_Listener
+    {
+    public:
+        virtual ~C_Listener() = default;
+        /*新文件创建*/
+        virtual int OnNewFileCreate() = 0;
+    };
+public:
+    C_FileMng(C_Listener* pListener);
     ~C_FileMng();
 
     //送入文件数据,内部进行保存并进行多文件管理
@@ -38,6 +46,7 @@ private:
     //获取文件大小
     unsigned int GetFileSize(std::string filePath);
 private:
+    C_Listener*  m_pListrner;                  //监听器
     std::ofstream m_outFile;
     unsigned int  m_fileSize{0};
 

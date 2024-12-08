@@ -12,7 +12,7 @@ C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight)
     m_Hight(Hight),
     m_pH264Enc(new C_h264Enc(this, Wight, Hight, Wight, Hight)),
     m_pTcpServer(new C_TcpServer(this)),
-    m_pFileMng(new C_FileMng()),
+    m_pFileMng(new C_FileMng(this)),
     m_pNv12Buff(new unsigned char[Wight*Hight+Wight*Hight/2])
 {
 
@@ -71,6 +71,15 @@ int C_Terminal::OnNewClientConnect(int fd)
 {
     CLOG_INF("OnNewClientConnect socketfd:%d\n", fd);
     //新客户端加入连接时请求编I帧
+    m_pH264Enc->ForceIframe();
+    return 0;
+}
+
+/*新文件创建*/
+int C_Terminal::OnNewFileCreate()
+{
+    CLOG_INF("OnNewFile Create!\n");
+    //文件创建时请求编I帧。，保证文件能够正常打开播放
     m_pH264Enc->ForceIframe();
     return 0;
 }

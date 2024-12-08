@@ -16,7 +16,8 @@
 
 
 class C_Terminal : public C_h264Enc::C_Listener,
-                   public C_TcpServer::C_Listener
+                   public C_TcpServer::C_Listener,
+                   public C_FileMng::C_Listener
 {
 public:
     C_Terminal(unsigned int Wight, unsigned int Hight);
@@ -41,7 +42,8 @@ private:
     /*新客户端连接事件*/
     int OnNewClientConnect(int fd) override;
 
-
+    /*新文件创建*/
+    int OnNewFileCreate() override;
 private:
     unsigned int m_Wight;
     unsigned int m_Hight;

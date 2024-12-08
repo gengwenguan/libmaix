@@ -26,6 +26,8 @@
 #include <opencv2/imgcodecs/legacy/constants_c.h>
 #include "opencv2/core/types_c.h"
 
+#include <alsa/asoundlib.h>
+
 #define CALC_FPS(tips)                                                                                     \
   {                                                                                                        \
     static int fcnt = 0;                                                                                   \
@@ -151,6 +153,15 @@ int main(int argc, char **argv)
     libmaix_cam_destroy(&m_camera);
     libmaix_cam_destroy(&m_camera1);
     delete pterminal;
+
+    // int err;
+    // snd_pcm_t *capture_handle;// 一个指向PCM设备的句柄
+
+	// if ((err = snd_pcm_open (&capture_handle, argv[1],SND_PCM_STREAM_CAPTURE,0))<0) 
+	// {
+	// 	printf("无法打开音频设备: %s (%s)\n",  argv[1],snd_strerror (err));
+	// 	exit(1);
+	// }
 
 #endif
 

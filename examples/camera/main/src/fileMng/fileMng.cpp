@@ -14,8 +14,9 @@
 #include"fileMng.h"
 #include"logAdapt.h"
 
-C_FileMng::C_FileMng()
-    :m_fileSize(0),
+C_FileMng::C_FileMng(C_Listener* pListener)
+    :m_pListrner(pListener),
+    m_fileSize(0),
     m_bRunFlag(true),
     m_pThread( new std::thread( [this]() { this->Accept(); }) )
 {
@@ -114,6 +115,8 @@ void C_FileMng::InputFileData(unsigned char* data, unsigned int dataLen)
 
             //新创建并打开一个文件
             m_outFile.open(filePath.c_str(), std::ios::out | std::ios::binary);
+            //回调通知新文件创建
+            m_pListrner->OnNewFileCreate();
 
             //将新创建的文件放入管理map中
             m_fileMap[filePath] = 0;

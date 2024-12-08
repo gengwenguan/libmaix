@@ -1,6 +1,7 @@
 ############### Add include ###################
 list(APPEND ADD_INCLUDE "include"
                         "dep/codec/inc"
+                        "dep/asound/inc"
                         "src/h264Enc"
                         "src/tcpServer"
                         "src/terminal"

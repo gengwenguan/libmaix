@@ -81,7 +81,7 @@ int C_ClientConnect::RecvCtrlMesssage(char* pData, unsigned int nLen)
             NLOG_INF("Fast back offset<%d> m_sendFileSize<%d>!\n", offset, m_sendFileSize);
         }
     }else if(message == 102){ // 102为快进
-            m_bNeedIframe = true;
+        m_bNeedIframe = true;
         //先更新文件大小
         m_sendFileSize = GetFileSize(m_fileMapIter->first);
         //要调整的偏移位置
