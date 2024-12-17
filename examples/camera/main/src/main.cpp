@@ -59,7 +59,7 @@ static void app_handlesig(int signo)
   }
 }
 
-
+#if 1
 int main(int argc, char **argv)
 {
     CLOG_INF("main enter!\n");
@@ -171,3 +171,4 @@ int main(int argc, char **argv)
     return 0;
 
 }
+#endif

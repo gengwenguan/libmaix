@@ -7,7 +7,7 @@
 #include "logAdapt.h"
 
 //输入的YUV分辨率和编码输出的h264分辨率
-C_h264Enc::C_h264Enc(C_Listener* pListener, unsigned int srcWight, unsigned int srcHight, unsigned int dstWidth, unsigned int dstHeight)
+C_H264Enc::C_H264Enc(C_Listener* pListener, unsigned int srcWight, unsigned int srcHight, unsigned int dstWidth, unsigned int dstHeight)
     :m_pListener(pListener)
 {
     m_h264Param.bEntropyCodingCABAC = 1;
@@ -72,7 +72,7 @@ C_h264Enc::C_h264Enc(C_Listener* pListener, unsigned int srcWight, unsigned int 
     m_inputBuffer.sCropInfo.nHeight = srcHight;
 }
 
-C_h264Enc::~C_h264Enc()
+C_H264Enc::~C_H264Enc()
 {
     CdcMemClose(m_baseConfig.memops);
     if(m_pVideoEnc != nullptr){
@@ -83,7 +83,7 @@ C_h264Enc::~C_h264Enc()
 }
 
 //输入NV21采集数据
-int C_h264Enc::InputData(unsigned char* inputData)
+int C_H264Enc::InputData(unsigned char* inputData)
 {
     //真正的强制I帧在送数据时进行控制
     if(m_forceIframe){
@@ -124,7 +124,7 @@ int C_h264Enc::InputData(unsigned char* inputData)
 }
 
 // 判断NAL单元类型
-C_h264Enc::NALUnitType C_h264Enc::GetNALType(unsigned char* data, unsigned int dataLen)
+C_H264Enc::NALUnitType C_H264Enc::GetNALType(unsigned char* data, unsigned int dataLen)
 {
     size_t pos = 0;
 
@@ -146,7 +146,7 @@ C_h264Enc::NALUnitType C_h264Enc::GetNALType(unsigned char* data, unsigned int d
 * 参  数：buffer - 目标缓冲区
 * 返回值：返回错误码或nalu长度
 ******************************************************************************/
-int C_h264Enc::get_h264_nalu(unsigned char  *buffer, unsigned length)
+int C_H264Enc::get_h264_nalu(unsigned char  *buffer, unsigned length)
 {
     unsigned pos = 0;
 

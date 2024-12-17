@@ -138,23 +138,23 @@ static inline float sigmod(float input)
     return 1.0 / (1.0 + expf(-input));
 }
 
-static void activate_array(region_layer_t *rl, int index, int n)
-{
-    float *output = &rl->output[index];
-    //uint8_t *input = &rl->input[index];
+// static void activate_array(region_layer_t *rl, int index, int n)
+// {
+//     float *output = &rl->output[index];
+//     //uint8_t *input = &rl->input[index];
 
-    for (int i = 0; i < n; ++i)
-        output[i] = 1.0 / (1.0 + expf(-output[i]));//rl->activate[input[i]];
-}
+//     for (int i = 0; i < n; ++i)
+//         output[i] = 1.0 / (1.0 + expf(-output[i]));//rl->activate[input[i]];
+// }
 
-static int entry_index(region_layer_t *rl, int location, int entry)
-{
-    int wh = rl->config->net_out_width * rl->config->net_out_height;
-    int n = location / wh;
-    int loc = location % wh;
+// static int entry_index(region_layer_t *rl, int location, int entry)
+// {
+//     int wh = rl->config->net_out_width * rl->config->net_out_height;
+//     int n = location / wh;
+//     int loc = location % wh;
 
-    return n * wh * (rl->coords + rl->config->classes_num + 1) + entry * wh + loc;
-}
+//     return n * wh * (rl->coords + rl->config->classes_num + 1) + entry * wh + loc;
+// }
 
 static void softmax(float *data, int n, int stride)
 {
@@ -321,7 +321,7 @@ static void get_region_boxes(region_layer_t *rl, float *predictions, float **pro
             }
         }
     }
-    int index = 874;
+    //int index = 874;
     correct_region_boxes(rl, boxes);
 }
 

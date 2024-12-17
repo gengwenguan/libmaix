@@ -1,5 +1,5 @@
 //
-// shellClient.cpp: 用于网络连接shellServer获取server上的信息。
+// shellClient.cpp: 用于网络连接shellServer获取server上的信息,该程序只针对windows平台有效。
 //
 
 #ifdef WIN32
@@ -12,13 +12,8 @@
 #include <synchapi.h>
 #pragma comment(lib,"ws2_32.lib")
 #include "stdafx.h"
-#else
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h> 
-#include <sys/socket.h>
-#include <netinet/in.h>
-#endif
+
+
 #include <errno.h>
 #include <string.h>
 #include <iostream>
@@ -31,7 +26,6 @@ static struct sockaddr_in server_in; //用于存储服务器的基本信息
 
 static int connect_shell_server(const char *ipaddr, const unsigned short port)
 {
-#ifdef WIN32
 	//初始化WSA
 	WORD sockVersion = MAKEWORD(2, 2);
 	WSADATA wsaData;
@@ -39,7 +33,6 @@ static int connect_shell_server(const char *ipaddr, const unsigned short port)
 		printf("WSAStartup error!");
 		return -1;
 	}
-#endif
 
 	socket_client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (INVALID_SOCKET == socket_client) {
@@ -67,11 +60,7 @@ static int connect_shell_server(const char *ipaddr, const unsigned short port)
 static int disconnect_shell_server(int socketfd)
 {
 	if (socketfd >= 0) {
-#ifdef  WIN32
 		closesocket(socketfd);
-#else
-		close(socketfd);
-#endif
 	}
 	return 0;
 }
@@ -94,7 +83,6 @@ static int send_cmd_line(int socketfd, const char *basename, const char *params)
 		printf("invalid format, basename<%s>, params<%s>\n", basename, params);//这个可以打印出错误码和原因
 		return -1;
 	}
-
 
 	int argc = params == NULL ? 1 : 2;
 	if (argc == 2)
@@ -158,11 +146,7 @@ int main(int argc, char* argv[])
 		<< localTime->tm_min << ':'             // 分
 		<< localTime->tm_sec << std::endl;      // 秒
 
-#ifdef  WIN32
 	const char *cmd_basename = argv[2];
-#else
-	const char *cmd_basename = basename(argv[1]);
-#endif
 	const char *cmd_params = argv[3];
 
 	int socketfd = connect_shell_server(ipaddr, port);
@@ -176,12 +160,8 @@ int main(int argc, char* argv[])
 		disconnect_shell_server(socketfd);
 		return -1;
 	}
-
-#ifdef  WIN32
+	
 	Sleep(100);
-#else
-	usleep(100 * 1000);
-#endif
 
 	receive_cmd_result(socketfd, recv_buf, max_recv_buf_len);
 
@@ -189,3 +169,4 @@ int main(int argc, char* argv[])
 
 	return 0;
 }
+#endif

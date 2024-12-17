@@ -2,11 +2,13 @@
 list(APPEND ADD_INCLUDE "include"
                         "dep/codec/inc"
                         "dep/asound/inc"
+                        "dep/ffmpeg/inc"
                         "src/h264Enc"
                         "src/tcpServer"
                         "src/terminal"
                         "src/utilTools"
                         "src/fileMng"
+                        "src/opusEnc"
     )
 list(APPEND ADD_PRIVATE_INCLUDE "")
 ###############################################
@@ -17,6 +19,7 @@ file(GLOB ADD_SRCS  "src/*.cpp"
                     "src/terminal/*.cpp"
                     "src/utilTools/*.cpp"
                     "src/fileMng/*.cpp"
+                    "src/opusEnc/*.cpp"
     )
 ############ Add source files #################
 # list(APPEND ADD_SRCS    "src/main.c"
@@ -37,6 +40,19 @@ list(APPEND ADD_REQUIREMENTS maix_cv_image libmaix)
 ############ Add static libs ##################
 # list(APPEND ADD_STATIC_LIB "lib/libtest.a")
 ###############################################
+list(APPEND ADD_DYNAMIC_LIB
+            "dep/ffmpeg/lib/libx264.so"
+            "dep/ffmpeg/lib/libssl.so"
+            "dep/ffmpeg/lib/libcrypto.so"
+            "dep/ffmpeg/lib/libavutil.so"
+            "dep/ffmpeg/lib/libpostproc.so"
+            "dep/ffmpeg/lib/libavcodec.so"
+            "dep/ffmpeg/lib/libavdevice.so"
+            "dep/ffmpeg/lib/libavfilter.so"
+            "dep/ffmpeg/lib/libavformat.so"
+            "dep/ffmpeg/lib/libswresample.so"
+            "dep/ffmpeg/lib/libswscale.so"
+            )
 
 #### Add compile option for this component ####
 #### Just for this component, won't affect other

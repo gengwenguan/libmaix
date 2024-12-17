@@ -130,7 +130,7 @@ int retinaface_get_channel_num(libmaix_nn_decoder_retinaface_config_t* config)
     }
 
     else{
-        int step_of_min_sizes [] = {2,2,2,2};
+        //int step_of_min_sizes [] = {2,2,2,2};
         for(int i=0; i < anchor_size_len; ++i)
         {
             anchor_num += config->input_w / config->steps[i] * (config->input_h / config->steps[i]) * 2;

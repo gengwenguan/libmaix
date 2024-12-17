@@ -130,7 +130,7 @@ char *libmaix_mud_get_sting_value(char *line)
 
 void libmaix_mud_set_inputs_value(float **values, mud_info * mud_info_obj) // float**指向二维数组
 {
-    int input_num = mud_info_obj->input_num;
+    //int input_num = mud_info_obj->input_num;
     for (int i = 0; i != mud_info_obj->input_num; i++)
     {
         for (int j = 0; j != 3; j++)
@@ -444,7 +444,7 @@ int libmaix_mud_get_section(FILE *fp, char *title, mud_info *mud_info_obj)
                 char *key = libmaix_mud_get_key(string_lines);
                 float *value = libmaix_mud_get_float_value(string_lines);
 
-                int count = 0;
+                //int count = 0;
                 if ( 0 == strcmp( key ,  "inputs_scale"))  // input scale
                 {
 
@@ -470,6 +470,7 @@ int libmaix_mud_get_section(FILE *fp, char *title, mud_info *mud_info_obj)
         }
         rewind(fp);
     }
+    return 0;
 }
 
 void libmaix_mud_read_mud_file(char * mud_path ,  mud_info * mud_info_obj)

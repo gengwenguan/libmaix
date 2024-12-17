@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <chrono>
 #include <string>
+#include <cstring>
+#include <cstddef>
 #if (defined(_WIN32) || defined(_WIN32_WCE) || defined(WIN64))
 #include <winsock.h>  
 #include <windows.h>
@@ -12,7 +14,7 @@
 #include <sys/time.h>
 #endif
 
-#include "rtpbase.h"
+#include "rtpBase.h"
 
 /**
 * Base_TimeNowUs get now time  //使用对应平台的系统接口获取精准的UTC至今的微妙数
@@ -656,7 +658,7 @@ void Base_RtcpStatistic(BASE_STATISTIC_RTCP_ST *pstRtcpInfo, unsigned char *pucD
 
 unsigned int Base_RtpParseHeader(const unsigned char *pucRtpBuffer, const unsigned int uiRtpLen, BASE_RTPHDR_ST* pstHeader)
 {
-  const unsigned char* const pucRTPDataBegin = pucRtpBuffer;                        /*指向缓冲开始*/
+  //const unsigned char* const pucRTPDataBegin = pucRtpBuffer;                        /*指向缓冲开始*/
   const unsigned char* const pucRTPDataEnd   = pucRtpBuffer + uiRtpLen;             /*指向缓冲结束*/
 
   const unsigned int length = uiRtpLen;                                           /*长度*/
@@ -732,7 +734,7 @@ unsigned int Base_RtpParseHeader(const unsigned char *pucRtpBuffer, const unsign
 
     pstHeader->uiHeaderLength += 4;                                             /*长度+4*/
 
-    unsigned short definedByProfile = ntohs(*(unsigned short *)ptr);                /*扩展头Profile ID*/
+    //unsigned short definedByProfile = ntohs(*(unsigned short *)ptr);                /*扩展头Profile ID*/
     ptr += 2;                                                                   /*后移2*/
 
     // in 32 bit words

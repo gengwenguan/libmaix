@@ -11,7 +11,7 @@
 #include<iostream>
 #include "vencoder.h"
 
-class C_h264Enc
+class C_H264Enc
 {
 public:
     // 定义NAL单元类型的枚举
@@ -30,8 +30,8 @@ public:
         virtual int OnOutputH264(unsigned char* data, unsigned int dataLen) = 0;
     };
 public:
-    C_h264Enc(C_Listener* pListener, unsigned int srcWight, unsigned int srcHight, unsigned int dstWidth, unsigned int dstHeight);
-    ~C_h264Enc();
+    C_H264Enc(C_Listener* pListener, unsigned int srcWight, unsigned int srcHight, unsigned int dstWidth, unsigned int dstHeight);
+    ~C_H264Enc();
     //输入NV21采集数据
     int InputData(unsigned char* inputData);
     //强制编码一帧关键帧，此处进行标记，实际在送数据时进行控制强制I帧
@@ -60,7 +60,4 @@ private:
     VencOutputBuffer m_outputBuffer;
     VencHeaderData m_sps_pps_data;
     bool           m_forceIframe = true;
-
-    FILE *out_file = NULL;
-
 };

@@ -16,7 +16,7 @@ void overlayImage(const cv::Mat &background, const cv::Mat &foreground, cv::Mat 
   if (opacity >= 0. && opacity <= 1.)
     allow_mix = true;
 
-  if (background.data != background.data)
+  if (background.data != foreground.data)
     background.copyTo(output);
   // start at the row indicated by location, or at row 0 if location.y is negative.
   for (int y = std::max(location.y, 0); y < background.rows; ++y)
@@ -1101,5 +1101,7 @@ LIBMAIX_IMAGE_MODE_BGR888 -> LIBMAIX_IMAGE_MODE_BGR888   :      2056
       cv::warpAffine(cv_src, cv_dst, warpMat, cv::Size(dst_w, dst_h));
       return LIBMAIX_ERR_NONE;
     }
+    return LIBMAIX_ERR_NONE;
   }
+
 }

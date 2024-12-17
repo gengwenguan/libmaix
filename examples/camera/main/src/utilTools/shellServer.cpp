@@ -1,3 +1,4 @@
+#include<cstring>
 #include "shellServer.h"
 #include "logAdapt.h"
 
@@ -343,7 +344,7 @@ void C_ShellServer::ShellServerNetTask(void)
 		/*接收shell命令和参数*/
 		if ((leftlen = header.length - sizeof(CMD_HEADER)) > 0)
 		{
-			if (leftlen >= RECV_BUF_LEN)
+			if ((unsigned int)leftlen >= RECV_BUF_LEN)
 			{
 				CLOG_ERR("data is too large: %d", leftlen);
 				close(client_sockfd);

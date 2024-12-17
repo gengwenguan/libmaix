@@ -259,9 +259,9 @@ extern "C"
         LIBMAIX_DEBUG_PRINTF();
         // get output buffer
         float *heatmaps = (float *)feature_map[0].data;
-        float *centers = (float *)feature_map[1].data;
+        //float *centers = (float *)feature_map[1].data;
         float *regs = (float *)feature_map[2].data;
-        float *offsets = (float *)feature_map[3].data;
+        //float *offsets = (float *)feature_map[3].data;
         LIBMAIX_DEBUG_PRINTF();
         //clean heatmap
         int heatmaps_pixels_number = num_joints * feature_map_area;
@@ -320,11 +320,11 @@ extern "C"
             LIBMAIX_DEBUG_PRINTF();
             // int joint_x = result_object->keypoints[2 * n];
             // int joint_y = result_object->keypoints[2 * n+1];
-            int offset_location_x = n * feature_map_area + joint_y * feature_map_size + joint_x;
-            int offset_location_y = location_x + feature_map_area;
+            //int offset_location_x = n * feature_map_area + joint_y * feature_map_size + joint_x;
+            //int offset_location_y = location_x + feature_map_area;
             LIBMAIX_DEBUG_PRINTF();
-            float offset_x = offsets[offset_location_x];
-            float offset_y = offsets[offset_location_y];
+            //float offset_x = offsets[offset_location_x];
+            //float offset_y = offsets[offset_location_y];
             LIBMAIX_DEBUG_PRINTF();
             float temp_res_x =(float) joint_x / feature_map_size;
             float temp_res_y = (float) joint_y / feature_map_size;

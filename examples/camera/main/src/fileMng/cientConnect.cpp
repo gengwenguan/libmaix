@@ -214,21 +214,21 @@ void C_ClientConnect::SendFileData()
                     nalBuffer.insert(nalBuffer.end(), buffer.begin()+readPos , buffer.begin()+readPos+startPos);
                     //找到了下一个NALU单元的起始码，同时nalBuffer中有数据时说明找到了一帧完整的NALU单元
                     if(!nalBuffer.empty()){
-                        C_h264Enc::NALUnitType NalType = C_h264Enc::GetNALType((unsigned char*)nalBuffer.data(), nalBuffer.size());
+                        C_H264Enc::NALUnitType NalType = C_H264Enc::GetNALType((unsigned char*)nalBuffer.data(), nalBuffer.size());
                         //NLOG_ERR("NalType=%d\n", NalType);
                         //发送一个完整的NALU单元
-                        if(NalType != C_h264Enc::NAL_UNKNOWN){
-                            if(m_bNeedIframe && NalType != C_h264Enc::NAL_IDR_PICTURE){
+                        if(NalType != C_H264Enc::NAL_UNKNOWN){
+                            if(m_bNeedIframe && NalType != C_H264Enc::NAL_IDR_PICTURE){
                                 //需要关键帧的时候不是spp的NAL跳过，避免终端预览时花屏
                                 NLOG_WRN("m_bNeedIframe, not IDR_PICTURE, skip this NAL\n");
                             }else{
                                 //是一个正常的NALU单元数据时发送该NALU给对应的客户端
                                 SendNal(nalBuffer.data(), nalBuffer.size());
-                                if(NalType == C_h264Enc::NAL_IDR_PICTURE || NalType == C_h264Enc::NAL_SLICE){
+                                if(NalType == C_H264Enc::NAL_IDR_PICTURE || NalType == C_H264Enc::NAL_SLICE){
                                     //如果NALU是一帧正常帧数据时延时30ms，保证文件发送速率接近30fps,视频快进时m_IntervalMs会变小
                                     std::this_thread::sleep_for(std::chrono::milliseconds(m_IntervalMs));
                                 }
-                                if(m_bNeedIframe && NalType == C_h264Enc::NAL_IDR_PICTURE)
+                                if(m_bNeedIframe && NalType == C_H264Enc::NAL_IDR_PICTURE)
                                     m_bNeedIframe = false;  //发送sps后续不需要I帧
                             }
 
