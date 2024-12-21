@@ -42,16 +42,29 @@ list(APPEND ADD_REQUIREMENTS maix_cv_image libmaix)
 ###############################################
 list(APPEND ADD_DYNAMIC_LIB
             "dep/ffmpeg/lib/libx264.so"
+            "dep/ffmpeg/lib/libx264.so.164"
+            "dep/ffmpeg/lib/libopus.so"
+            "dep/ffmpeg/lib/libopus.so.0"
             "dep/ffmpeg/lib/libssl.so"
+            "dep/ffmpeg/lib/libssl.so.1.1"
             "dep/ffmpeg/lib/libcrypto.so"
+            "dep/ffmpeg/lib/libcrypto.so.1.1"
             "dep/ffmpeg/lib/libavutil.so"
+            "dep/ffmpeg/lib/libavutil.so.56"
             "dep/ffmpeg/lib/libpostproc.so"
+            "dep/ffmpeg/lib/libpostproc.so.55"
             "dep/ffmpeg/lib/libavcodec.so"
+            "dep/ffmpeg/lib/libavcodec.so.58"
             "dep/ffmpeg/lib/libavdevice.so"
+            "dep/ffmpeg/lib/libavdevice.so.58"
             "dep/ffmpeg/lib/libavfilter.so"
+            "dep/ffmpeg/lib/libavfilter.so.7"
             "dep/ffmpeg/lib/libavformat.so"
+            "dep/ffmpeg/lib/libavformat.so.58"
             "dep/ffmpeg/lib/libswresample.so"
+            "dep/ffmpeg/lib/libswresample.so.3"
             "dep/ffmpeg/lib/libswscale.so"
+            "dep/ffmpeg/lib/libswscale.so.5"
             )
 
 #### Add compile option for this component ####

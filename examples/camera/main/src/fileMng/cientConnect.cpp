@@ -32,9 +32,8 @@ C_ClientConnect::C_ClientConnect(int socketFd, std::map<std::string, unsigned in
 C_ClientConnect::~C_ClientConnect()
 {
     m_bRunFlag = false;
-    if(m_pThread != nullptr){
-        m_pThread->join();
-    }
+    m_pThread->join();
+
     if(m_sendFile.is_open()){
         m_sendFile.close();
     }

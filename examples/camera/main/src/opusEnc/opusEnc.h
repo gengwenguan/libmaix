@@ -10,7 +10,9 @@
 #include<iostream>
 #include <thread>
 #include <mutex>
+
 extern "C" {
+    #include <alsa/asoundlib.h>
     #include <libavutil/avutil.h>
     #include <libavdevice/avdevice.h>
     #include <libavformat/avformat.h>
@@ -32,22 +34,16 @@ public:
     ~C_OpusEnc();
 
 private:
-    //音频采集线程对应的逻辑函数
-    void CaptureAudio();
-    //音频编码线程对应的逻辑函数
-    void EncoderAudio();
+    //音频采集编码
+    void CaptureEncoder();
 private:
     C_Listener* m_pListener;
-    AVFormatContext *m_input_ctx = nullptr;
-    AVDictionary *m_options = nullptr;
 
-    int m_audio_stream_index;
+    snd_pcm_t *m_capture_handle; //pcm采集句柄
 
-    std::mutex m_pFifoMutex;
-    AVFifoBuffer *m_pFifo;
+    AVCodecContext *m_codec_ctx; //opus编码器上下文
 
     bool m_bRun;
-    std::unique_ptr<std::thread> m_pCaptureThread;    //音频采集线程
-    std::unique_ptr<std::thread> m_pEncoderThread;    //音频采集线程
+    std::unique_ptr<std::thread> m_pCaptureEncoderThread;  //音频采集编码线程
 
 };

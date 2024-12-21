@@ -2,6 +2,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <iostream>
+#include <thread>
 #include <chrono>
 #include <ctime>
 #include <iomanip> // 用于设置输出格式
@@ -14,11 +15,19 @@ C_LogAdapt  gs_objLogNormal;
 /*网络自适应模块不同级别日志输出接口*/
 void C_LogAdapt::LogInner(const char *pscLevel, const char *pscFile, const char *pscFunc, unsigned int uiLine, const char *pscFmt, ...)	
 {
-	int         siRetVal;                       
+	int         siRetVal;
 	char        ascFormat[kMaxLogLen] = {0};
-                                   
-	siRetVal = snprintf(ascFormat, kMaxLogLen, "%s %s:[ %s ]<%s:%d:%s>: %s",
+
+    // 获取当前线程的ID
+    std::thread::id threadId = std::this_thread::get_id();
+    // 将 std::thread::id 转换为字符串
+    std::ostringstream oss;
+    oss << threadId;
+    std::string threadIdStr = oss.str();
+
+	siRetVal = snprintf(ascFormat, kMaxLogLen, "%s thread_id:%s %s:[ %s ]<%s:%d:%s>: %s",
 		GetCurrentDateTimeInChina().c_str(),
+		threadIdStr.c_str(),
 		pscLevel,
 		m_ossKey.str().c_str(),
 		getFileName((char *)pscFile), 

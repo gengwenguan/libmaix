@@ -8,62 +8,93 @@
     CLOG_ERR("Error:%s,%d\n", errbuf, errnum); \
 } while (0)
 
+void check_alsa_error(int err, const char *msg) {
+    if (err < 0) {
+        fprintf(stderr, "ALSA error: %s: %s\n", msg, snd_strerror(err));
+        exit(EXIT_FAILURE);
+    }
+}
+
+constexpr unsigned int SAMPLE_RATE = 48000;
+constexpr unsigned long PERIOD_SIZE = 960;  // 20ms at 48kHz
+constexpr unsigned int CHANNELS = 1;
 
 C_OpusEnc::C_OpusEnc(C_Listener* pListener)
-    :m_pListener(pListener),
-    m_audio_stream_index(-1)
+    :m_pListener(pListener)
 {
-    // 初始化 FFmpeg
-    avdevice_register_all();
-    //av_register_all();
+    int err;
+    snd_pcm_hw_params_t *hw_params;
 
     // 打开音频设备
+    err = snd_pcm_open(&m_capture_handle, "default", SND_PCM_STREAM_CAPTURE, 0);
+    check_alsa_error(err, "Opening PCM device for capture");
 
-    // 设置设备参数
-    av_dict_set(&m_options, "channels", "1", 0);  // 单声道
-    av_dict_set(&m_options, "sample_rate", "48000", 0);  // 48000 Hz
-    av_dict_set(&m_options, "sample_fmt", "s16", 0);  // 采样格式为16位
-    //av_dict_set(&m_options, "fragment_size", "1920", 0);  // 设置缓冲区大小
-    //av_dict_set(&m_options, "buffer_size", "1920", 0);  // 设置缓冲区大小
+    // 分配和初始化硬件参数
+    err = snd_pcm_hw_params_malloc(&hw_params);
+    check_alsa_error(err, "Allocating hardware parameters");
 
-    // 设置设备名称和格式
-    const char *device_name = "hw:0,0";  // 默认音频设备
-    const char *format_name = "alsa";   // 使用 alsa 作为输入设备
+    err = snd_pcm_hw_params_any(m_capture_handle, hw_params);
+    check_alsa_error(err, "Initializing hardware parameters");
 
-    // 打开输入流
-    int ret = avformat_open_input(&m_input_ctx, device_name, av_find_input_format(format_name), &m_options);
-    if (ret < 0) {
-        PRINT_ERROR(ret);
+    err = snd_pcm_hw_params_set_access(m_capture_handle, hw_params, SND_PCM_ACCESS_RW_INTERLEAVED);
+    check_alsa_error(err, "Setting access type");
+
+    err = snd_pcm_hw_params_set_format(m_capture_handle, hw_params, SND_PCM_FORMAT_S16_LE);
+    check_alsa_error(err, "Setting sample format");
+
+    unsigned int smaple_rate = SAMPLE_RATE;
+    err = snd_pcm_hw_params_set_rate_near(m_capture_handle, hw_params, &smaple_rate, 0);
+    check_alsa_error(err, "Setting sample rate");
+
+    err = snd_pcm_hw_params_set_channels(m_capture_handle, hw_params, CHANNELS);
+    check_alsa_error(err, "Setting channel count");
+
+    unsigned long period_size = PERIOD_SIZE;  // 20ms at 48kHz
+    err = snd_pcm_hw_params_set_period_size_near(m_capture_handle, hw_params, &period_size, 0);
+    check_alsa_error(err, "Setting period size");
+
+    err = snd_pcm_hw_params(m_capture_handle, hw_params);
+    check_alsa_error(err, "Setting hardware parameters");
+
+    // 释放硬件参数结构
+    snd_pcm_hw_params_free(hw_params);
+
+    // 准备设备
+    err = snd_pcm_prepare(m_capture_handle);
+    check_alsa_error(err, "Preparing the PCM device");
+
+    // 找到Opus编码器
+    AVCodec *codec = avcodec_find_encoder(AV_CODEC_ID_OPUS);
+    if (!codec) {
+        CLOG_ERR("Could not find AV_CODEC_ID_OPUS\n");
         return;
     }
 
-    // 查找流信息
-    ret = avformat_find_stream_info(m_input_ctx, nullptr);
-    if (ret < 0) {
-        PRINT_ERROR(ret);
-        avformat_close_input(&m_input_ctx);
+    // 分配编码上下文
+    m_codec_ctx = avcodec_alloc_context3(codec);
+    if(!m_codec_ctx){
+        CLOG_ERR("Could not alloc m_codec_ctx\n");
         return;
     }
 
-    // 查找音频流
-    for (unsigned int i = 0; i < m_input_ctx->nb_streams; i++) {
-        if (m_input_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-            m_audio_stream_index = i;
-            break;
-        }
-    }
-    if (m_audio_stream_index == -1) {
-        CLOG_ERR("Could not find audio stream.\n");
-        avformat_close_input(&m_input_ctx);
-        return ;
-    }
+    // 设置编码参数
+    m_codec_ctx->sample_rate = SAMPLE_RATE;
+    m_codec_ctx->channel_layout = AV_CH_LAYOUT_MONO;
+    m_codec_ctx->channels = CHANNELS;
+    m_codec_ctx->sample_fmt = AV_SAMPLE_FMT_S16;
+    m_codec_ctx->bit_rate = 64000; // 根据需要设置比特率
 
-    //fifo缓存大小
-    m_pFifo = av_fifo_alloc(kFifoSize);
+    // 允许使用实验性的编码器
+    //m_codec_ctx->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
+
+    // 打开编码器
+    if (avcodec_open2(m_codec_ctx, codec, nullptr) < 0) {
+        CLOG_ERR("Could not open m_codec\n");
+        return;
+    }
 
     m_bRun = true;
-    m_pCaptureThread = std::unique_ptr<std::thread>(new std::thread( [this]() { this->CaptureAudio(); }));
-    m_pEncoderThread = std::unique_ptr<std::thread>(new std::thread( [this]() { this->EncoderAudio(); }));
+    m_pCaptureEncoderThread = std::unique_ptr<std::thread>(new std::thread( [this]() { this->CaptureEncoder(); }));
     //AVFifoBuffer *av_fifo_alloc(unsigned int size);
 }
 
@@ -71,56 +102,100 @@ C_OpusEnc::C_OpusEnc(C_Listener* pListener)
 C_OpusEnc::~C_OpusEnc()
 {
     m_bRun = false;
-    m_pCaptureThread->join();
-    m_pEncoderThread->join();
+    m_pCaptureEncoderThread->join();
 
-    avformat_close_input(&m_input_ctx);
-    av_dict_free(&m_options);
+    avcodec_close(m_codec_ctx);
+    avcodec_free_context(&m_codec_ctx);
+
+    snd_pcm_close(m_capture_handle);
 }
 
 // 音频采集逻辑
-void C_OpusEnc::CaptureAudio()
+void C_OpusEnc::CaptureEncoder()
 {
-    // 读取音频数据并写入文件
-    AVPacket *pkt = av_packet_alloc();
-    if (!pkt) {
-        CLOG_ERR("Failed to allocate AVPacket\n");
-        return;  // 或其他错误处理逻辑
+    // 分配AVFrame
+    AVFrame* frame = av_frame_alloc();
+    if (!frame) {
+        CLOG_ERR("Could not alloc frame\n");
+        return;
     }
+    frame->nb_samples = 960; // 20ms * 48000Hz = 960 samples
+    frame->format = AV_SAMPLE_FMT_S16;
+    frame->channel_layout = AV_CH_LAYOUT_MONO;
+    frame->channels = 1;
+    frame->sample_rate = 48000;
+    // 分配缓冲区
+    if (av_frame_get_buffer(frame, 0) < 0) {
+        CLOG_ERR("frame Could not get buffer\n");
+        return;
+    }
+    //申请输出包
+    AVPacket *pkt = av_packet_alloc();
 
-    while (m_bRun && av_read_frame(m_input_ctx, pkt) >= 0) {
-        if (pkt->stream_index == m_audio_stream_index) {
-            //将从声卡采集的数据写入到fifo缓冲区中
-            {
-                std::lock_guard<std::mutex> lock(m_pFifoMutex);
-                if (av_fifo_space(m_pFifo) < pkt->size) {
-                    CLOG_ERR("Not enough space in FIFO to write data\n");
-                }else{
-                    av_fifo_generic_write(m_pFifo, pkt->data, pkt->size, NULL);
+    std::unique_ptr<char[]> captureBuffer = std::unique_ptr<char[]>(new char[PERIOD_SIZE * 2]);
+    int err;
+    while (m_bRun) {
+        // 读取音频数据
+        err = snd_pcm_readi(m_capture_handle, captureBuffer.get(), PERIOD_SIZE);
+        if (err == -EPIPE) {
+            fprintf(stderr, "Underrun occurred\n");
+            snd_pcm_prepare(m_capture_handle);
+            continue;
+        }
+        check_alsa_error(err, "Reading from PCM device");
+
+            //此处可控制pcm文件写入文件，用于临时测试数据是否正常
+            if(true){ 
+                //智能指针删除器
+                auto fileDeleter = [](std::ofstream* pobj){ pobj->close(); delete pobj; };
+                //使用静态智能指针，程序退出后资源释放文件正常关闭
+                static auto outputFile = std::unique_ptr<std::ofstream, decltype(fileDeleter)>(
+                    new std::ofstream("capture.pcm", std::ios::out | std::ios::binary),
+                    fileDeleter
+                );
+                static unsigned int fileSize = 0; //统计写入的文件大小
+                //文件正常打开时进行写入
+                if(outputFile->is_open()){
+                    outputFile->write((const char*)captureBuffer.get(), PERIOD_SIZE * 2);
+
+                    fileSize += (PERIOD_SIZE * 2);
+                    if(fileSize > 10 * 1024 * 1024){ //文件大于10M时重新保存
+                        fileSize = 0;
+                        outputFile->close();
+                        outputFile->open("capture.pcm", std::ios::out | std::ios::binary);
+                    }
                 }
             }
-            // CLOG_INF("pkt.size=%d\n", pkt->size);
-            // fwrite(pkt->data, 1, pkt->size, pcm_file);
+
+
+        CLOG_INF("Sample  %d: %d\n", captureBuffer[0], captureBuffer[PERIOD_SIZE-1]);
+        // 编码帧
+        frame->data[0] = (unsigned char*)captureBuffer.get();
+        frame->nb_samples = 960; // 20ms * 48000Hz = 960 samples
+        //frame->pkt_size
+        int ret = avcodec_send_frame(m_codec_ctx, frame);
+        if (ret < 0) {
+            CLOG_ERR("Could not send frame to m_codec_ctx\n");
+            PRINT_ERROR(ret);
+        }else{
+            // 获取编码后的数据
+            ret = avcodec_receive_packet(m_codec_ctx, pkt);
+            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+                CLOG_ERR("m_codec_ctx no data output\n");
+            } else if (ret < 0) {
+                PRINT_ERROR(ret);
+            } else {
+                // 编码后的数据在pkt.data，长度是pkt.size,回调opus编码数据
+                m_pListener->OnOutputOpus(pkt->data, pkt->size);
+                // 释放pkt
+                av_packet_unref(pkt);
+            }
         }
-        av_packet_unref(pkt);
     }
 
     // 释放 AVPacket
     av_packet_free(&pkt);
-}
-
-//音频编码线程对应的逻辑函数
-void C_OpusEnc::EncoderAudio()
-{
-    int bytes_read;
-    std::unique_ptr<char[]> EncBuff = std::unique_ptr<char[]>(new char[kEncBuffSize]);
-    while(m_bRun){
-        {
-            std::lock_guard<std::mutex> lock(m_pFifoMutex);
-            bytes_read = av_fifo_generic_read(m_pFifo, EncBuff.get(), kEncBuffSize, NULL);
-            if(bytes_read != kEncBuffSize) continue;
-        }
-
-    }
-
+    // 释放资源
+    av_frame_free(&frame);
+    CLOG_INF("CaptureEncoder exit\n");
 }

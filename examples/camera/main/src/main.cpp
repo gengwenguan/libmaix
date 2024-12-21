@@ -1,4 +1,5 @@
 
+#if 1
 #include<stdio.h>
 #include<iostream>
 #include <fstream>
@@ -59,7 +60,7 @@ static void app_handlesig(int signo)
   }
 }
 
-#if 1
+
 int main(int argc, char **argv)
 {
     CLOG_INF("main enter!\n");

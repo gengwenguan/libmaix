@@ -13,11 +13,12 @@
 #include "h264Enc.h"
 #include "tcpServer.h"
 #include "fileMng.h"
-
+#include "opusEnc.h"
 
 class C_Terminal : public C_H264Enc::C_Listener,
                    public C_TcpServer::C_Listener,
-                   public C_FileMng::C_Listener
+                   public C_FileMng::C_Listener,
+                   public C_OpusEnc::C_Listener
 {
 public:
     C_Terminal(unsigned int Wight, unsigned int Hight);
@@ -39,6 +40,9 @@ private:
     //编码器回调的H264数据
     int OnOutputH264(unsigned char* data, unsigned int dataLen) override;
 
+    //音频编码回调的opus数据
+    int OnOutputOpus(unsigned char* data, unsigned int dataLen) override;
+
     /*新客户端连接事件*/
     int OnNewClientConnect(int fd) override;
 
@@ -49,6 +53,7 @@ private:
     unsigned int m_Hight;
 
     std::unique_ptr<C_H264Enc>   m_pH264Enc;
+    std::unique_ptr<C_OpusEnc>   m_pOpusEnc;
     std::unique_ptr<C_TcpServer> m_pTcpServer;
     std::unique_ptr<C_FileMng>   m_pFileMng;
 
