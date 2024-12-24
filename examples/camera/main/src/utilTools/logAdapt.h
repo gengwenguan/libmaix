@@ -34,7 +34,8 @@ private:
 	/*从文件存放路径中提取文件名，兼容windows和Linux平台*/
 	char *getFileName(char *pucFileWithPath);
 
-
+	//获取线程id，兼容windows，mac，linux平台
+	int get_os_thread_id();
 private:
 	std::ostringstream m_ossKey;  /* 区分不同对象的key信息 */
 };
