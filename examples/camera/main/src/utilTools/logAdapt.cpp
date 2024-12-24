@@ -7,6 +7,13 @@
 #include <ctime>
 #include <iomanip> // 用于设置输出格式
 #include <cmath>   // 用于计算时差
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <pthread.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 #include "logAdapt.h"
 
 /*没有继承C_LogAdapt类的或是C函数里进行打印使用该全局类接口*/
@@ -18,16 +25,9 @@ void C_LogAdapt::LogInner(const char *pscLevel, const char *pscFile, const char 
 	int         siRetVal;
 	char        ascFormat[kMaxLogLen] = {0};
 
-    // 获取当前线程的ID
-    std::thread::id threadId = std::this_thread::get_id();
-    // 将 std::thread::id 转换为字符串
-    std::ostringstream oss;
-    oss << threadId;
-    std::string threadIdStr = oss.str();
-
-	siRetVal = snprintf(ascFormat, kMaxLogLen, "%s thread_id:%s %s:[ %s ]<%s:%d:%s>: %s",
+	siRetVal = snprintf(ascFormat, kMaxLogLen, "%s thread_id:%d %s:[ %s ]<%s:%d:%s>: %s",
 		GetCurrentDateTimeInChina().c_str(),
-		threadIdStr.c_str(),
+		get_os_thread_id(),
 		pscLevel,
 		m_ossKey.str().c_str(),
 		getFileName((char *)pscFile), 
@@ -88,6 +88,25 @@ char* C_LogAdapt::getFileName(char *pucFileWithPath)
 	return (nullptr == pscBaseName) ? pucFileWithPath : (pscBaseName + 1);
 }
 
+//获取线程id，兼容windows，mac，linux平台
+int C_LogAdapt::get_os_thread_id()
+{
+#ifdef _WIN32
+	// 在 Windows 上使用 GetCurrentThreadId
+	DWORD tid = GetCurrentThreadId();
+	return static_cast<int>(tid);
+#elif defined(__APPLE__)
+	uint64_t tid;
+	// 在 macOS 和 iOS 上使用 pthread_threadid_np
+	pthread_threadid_np(pthread_self(), &tid);
+	return static_cast<int>(tid);
+#else
+	// 在 Linux 上使用 syscall(SYS_gettid)
+	pid_t tid = syscall(SYS_gettid);
+	return static_cast<int>(tid);
+#endif
+
+}
 
 // 中国时区偏移量（UTC+8）
 constexpr int CHINA_TIME_OFFSET = 8 * 60 * 60; // 秒
