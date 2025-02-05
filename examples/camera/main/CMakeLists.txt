@@ -1,6 +1,5 @@
 ############### Add include ###################
-list(APPEND ADD_INCLUDE "include"
-                        "dep/codec/inc"
+list(APPEND ADD_INCLUDE "dep/codec/inc"
                         "dep/asound/inc"
                         "dep/ffmpeg/inc"
                         "src/h264Enc"
