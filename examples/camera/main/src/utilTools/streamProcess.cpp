@@ -1,18 +1,9 @@
 #include"streamProcess.h"
-#include"NPQosBundle.h" 
 #include <fstream>
-#include"peer.h"
 #include <sstream>
-//extern std::list<C_Peer_Inner *>     gs_aobjNetAdaptPeers;     /*全部的Peer通道列表*/
+#include <cstring>
 
-C_StreamProcess::C_StreamProcess(NETADAPTSFU_STREAMCFG_ST *pstStreamCfg)
-	            :m_stStreamCfg(*pstStreamCfg),
-				m_uiWidth(0),
-				m_uiHeight(0),
-				m_stStreamStatistic{},
-			    m_stInputSave{},
-				m_stOutputSave{},
-				m_stIOStatistic{}
+C_StreamProcess::C_StreamProcess()
 {
 
 }
@@ -34,9 +25,11 @@ C_StreamProcess::~C_StreamProcess()
 void C_StreamProcess::Rtp_Input_Statistic(unsigned char *pucDataBuf, unsigned int uiDataLen)
 {
 	unsigned char ucPt = Base_RtpGetPt(pucDataBuf);
-	if (m_stStreamCfg.enStreamType == STREAM_VIDEO
-		&& m_stStreamCfg.unStreamInfo.stVideoInfo.enFecType != NETADAPTSFU_FECTYPE_NONE
-		&& kNpqFecPt == ucPt)
+	if (
+		// m_stStreamCfg.enStreamType == STREAM_VIDEO
+		// && m_stStreamCfg.unStreamInfo.stVideoInfo.enFecType != NETADAPTSFU_FECTYPE_NONE
+		// && 
+		kNpqFecPt == ucPt)
 	{
 		/*FEC冗余包统计*/
 		rtxFecStatistic(&(m_stStreamStatistic.stInputFecInfo), pucDataBuf, uiDataLen, "Input");
@@ -44,18 +37,18 @@ void C_StreamProcess::Rtp_Input_Statistic(unsigned char *pucDataBuf, unsigned in
 	}
 
 	/*RTP重传数据统计*/
-	if (Base_RtpIsRtx(pucDataBuf, uiDataLen))
-	{
-		rtxFecStatistic(&(m_stStreamStatistic.stInputRtxInfo), pucDataBuf, uiDataLen, "Input");
-		return;
-	}
+	// if (Base_RtpIsRtx(pucDataBuf, uiDataLen))
+	// {
+	// 	rtxFecStatistic(&(m_stStreamStatistic.stInputRtxInfo), pucDataBuf, uiDataLen, "Input");
+	// 	return;
+	// }
 
 	/*预测冗余数据统计*/
-	if (Base_RtpIsPadding(pucDataBuf, uiDataLen))
-	{
-		rtxFecStatistic(&(m_stStreamStatistic.stInputPadInfo), pucDataBuf, uiDataLen, "Input");
-		return;
-	}
+	// if (Base_RtpIsPadding(pucDataBuf, uiDataLen))
+	// {
+	// 	rtxFecStatistic(&(m_stStreamStatistic.stInputPadInfo), pucDataBuf, uiDataLen, "Input");
+	// 	return;
+	// }
 
 	/*RTP包统计*/
 	rtpStatistic(&(m_stStreamStatistic.stInputRtpInfo), pucDataBuf, uiDataLen, "Input");
@@ -78,27 +71,29 @@ void C_StreamProcess::Rtp_Input_Statistic(unsigned char *pucDataBuf, unsigned in
 void C_StreamProcess::Rtp_Output_Statistic(unsigned char *pucDataBuf, unsigned int uiDataLen)
 {
 	unsigned char ucPt = Base_RtpGetPt(pucDataBuf);
-	if (m_stStreamCfg.enStreamType == STREAM_VIDEO
-		&& m_stStreamCfg.unStreamInfo.stVideoInfo.enFecType != NETADAPTSFU_FECTYPE_NONE
-		&& kNpqFecPt == ucPt)
+	if (
+		// m_stStreamCfg.enStreamType == STREAM_VIDEO
+		// && m_stStreamCfg.unStreamInfo.stVideoInfo.enFecType != NETADAPTSFU_FECTYPE_NONE
+		// && 
+		kNpqFecPt == ucPt)
 	{
 		rtxFecStatistic(&(m_stStreamStatistic.stOutputFecInfo), pucDataBuf, uiDataLen, "Output");   /*fec数据包统计*/
 		return;
 	}
 
 	/*RTP重传数据统计*/
-	if (Base_RtpIsRtx(pucDataBuf, uiDataLen))
-	{
-		rtxFecStatistic(&(m_stStreamStatistic.stOutputRtxInfo), pucDataBuf, uiDataLen, "Output");
-		return;
-	}
+	// if (Base_RtpIsRtx(pucDataBuf, uiDataLen))
+	// {
+	// 	rtxFecStatistic(&(m_stStreamStatistic.stOutputRtxInfo), pucDataBuf, uiDataLen, "Output");
+	// 	return;
+	// }
 
 	/*预测冗余数据统计*/
-	if (Base_RtpIsPadding(pucDataBuf, uiDataLen))
-	{
-		rtxFecStatistic(&(m_stStreamStatistic.stOutputPadInfo), pucDataBuf, uiDataLen, "Output");
-		return;
-	}
+	// if (Base_RtpIsPadding(pucDataBuf, uiDataLen))
+	// {
+	// 	rtxFecStatistic(&(m_stStreamStatistic.stOutputPadInfo), pucDataBuf, uiDataLen, "Output");
+	// 	return;
+	// }
 
 	/*RTP数据包统计*/
 	rtpStatistic(&(m_stStreamStatistic.stOutputRtpInfo), pucDataBuf, uiDataLen, "Output");
@@ -208,47 +203,47 @@ int C_StreamProcess::PrintStreamStatistic(char *pscSendBuf)
 	/*获取输入的RTCP统计*/
 	printRtcpStatisticInfo(true, pscSendBuf);
 
-	/*获取NPQ相关状态统计*/
-	NPQ_STAT stNpqStat;
-	int siRetVal;
-	/*获取对应的流的NPQ统计状态*/
-	siRetVal = GetNpqStat(&stNpqStat);
-	if (NPQ_OK == siRetVal)
-	{
-		sprintf(pscSendBuf + strlen(pscSendBuf),
-			"**********************************************************Npq Quality*********************************************************\n");
-		sprintf(pscSendBuf + strlen(pscSendBuf),
-			"BitRate   TBitRate  RttUs     RealRttUs LossInput LossRecov FrameRate\n");
-		sprintf(pscSendBuf + strlen(pscSendBuf),
-			"%-10d%-10d%-10d%-10d%-10d%-10d%-10d\n",
-			stNpqStat.nBitRate / 1000, stNpqStat.nTotalBitRate / 1000,  stNpqStat.nRttUs, stNpqStat.nRealRttUs,
-			stNpqStat.cLossFraction, stNpqStat.cLossFraction2, stNpqStat.nFrameRate);
+	// /*获取NPQ相关状态统计*/
+	// NPQ_STAT stNpqStat;
+	// int siRetVal;
+	// /*获取对应的流的NPQ统计状态*/
+	// siRetVal = GetNpqStat(&stNpqStat);
+	// if (NPQ_OK == siRetVal)
+	// {
+	// 	sprintf(pscSendBuf + strlen(pscSendBuf),
+	// 		"**********************************************************Npq Quality*********************************************************\n");
+	// 	sprintf(pscSendBuf + strlen(pscSendBuf),
+	// 		"BitRate   TBitRate  RttUs     RealRttUs LossInput LossRecov FrameRate\n");
+	// 	sprintf(pscSendBuf + strlen(pscSendBuf),
+	// 		"%-10d%-10d%-10d%-10d%-10d%-10d%-10d\n",
+	// 		stNpqStat.nBitRate / 1000, stNpqStat.nTotalBitRate / 1000,  stNpqStat.nRttUs, stNpqStat.nRealRttUs,
+	// 		stNpqStat.cLossFraction, stNpqStat.cLossFraction2, stNpqStat.nFrameRate);
 
-		if (m_stStreamCfg.enStreamType == STREAM_VIDEO)
-		{
-			sprintf(pscSendBuf + strlen(pscSendBuf),
-				"VideoRate NackRate  FecRate   Delayms   JittIV    JittOV    PicQ      RttQ      FluQ      \n");
-			sprintf(pscSendBuf + strlen(pscSendBuf),
-				"%-10d%-10d%-10d%-10d%-10d%-10d%-10d%-10d%-10d\n",
-				stNpqStat.nVideoBitRate / 1000, stNpqStat.nBitRateNack / 1000, stNpqStat.nBitRateFec / 1000, 
-				stNpqStat.nVideoDelay / 1000, stNpqStat.nVideoJitterI / 1000, stNpqStat.nVideoJitterO / 1000,
-				stNpqStat.nVideoPicQ, stNpqStat.nVideoRTQ, stNpqStat.nVideoFluQ);
-		}
-		else if (m_stStreamCfg.enStreamType == STREAM_AUDIO)
-		{
-			sprintf(pscSendBuf + strlen(pscSendBuf),
-				"Delayms   JittIA    JittOA    TonQ      RttQ      FluQ      \n");
-			sprintf(pscSendBuf + strlen(pscSendBuf),
-				"%-10d%-10d%-10d%-10d%-10d%-10d\n",
-				stNpqStat.nAudioDelay / 1000, stNpqStat.nAudioJitterI / 1000, stNpqStat.nAudioJitterO / 1000,
-				stNpqStat.nAudioTonQ, stNpqStat.nAudioRTQ, stNpqStat.nAudioFluQ);
-		}
-	}
-	else
-	{
-		sprintf(pscSendBuf + strlen(pscSendBuf), "NpqGetStat Failed, RetVal <0x%x>\n", siRetVal);
-		NLOG_ERR("NpqGetStat Failed, RetVal <0x%x>\n", siRetVal);
-	}
+	// 	if (m_stStreamCfg.enStreamType == STREAM_VIDEO)
+	// 	{
+	// 		sprintf(pscSendBuf + strlen(pscSendBuf),
+	// 			"VideoRate NackRate  FecRate   Delayms   JittIV    JittOV    PicQ      RttQ      FluQ      \n");
+	// 		sprintf(pscSendBuf + strlen(pscSendBuf),
+	// 			"%-10d%-10d%-10d%-10d%-10d%-10d%-10d%-10d%-10d\n",
+	// 			stNpqStat.nVideoBitRate / 1000, stNpqStat.nBitRateNack / 1000, stNpqStat.nBitRateFec / 1000, 
+	// 			stNpqStat.nVideoDelay / 1000, stNpqStat.nVideoJitterI / 1000, stNpqStat.nVideoJitterO / 1000,
+	// 			stNpqStat.nVideoPicQ, stNpqStat.nVideoRTQ, stNpqStat.nVideoFluQ);
+	// 	}
+	// 	else if (m_stStreamCfg.enStreamType == STREAM_AUDIO)
+	// 	{
+	// 		sprintf(pscSendBuf + strlen(pscSendBuf),
+	// 			"Delayms   JittIA    JittOA    TonQ      RttQ      FluQ      \n");
+	// 		sprintf(pscSendBuf + strlen(pscSendBuf),
+	// 			"%-10d%-10d%-10d%-10d%-10d%-10d\n",
+	// 			stNpqStat.nAudioDelay / 1000, stNpqStat.nAudioJitterI / 1000, stNpqStat.nAudioJitterO / 1000,
+	// 			stNpqStat.nAudioTonQ, stNpqStat.nAudioRTQ, stNpqStat.nAudioFluQ);
+	// 	}
+	// }
+	// else
+	// {
+	// 	sprintf(pscSendBuf + strlen(pscSendBuf), "NpqGetStat Failed, RetVal <0x%x>\n", siRetVal);
+	// 	NLOG_ERR("NpqGetStat Failed, RetVal <0x%x>\n", siRetVal);
+	// }
 
 	/*获取输出的RTP统计*/
 	printRtpStatisticInfo(false, pscSendBuf);
@@ -328,16 +323,16 @@ int C_StreamProcess::printRtpStatisticInfo(bool bInput, char *pscSendBuf)
 		pstRtp->uiSpaceTimeMs,     pstRtp->uiRecvKeyFrameCnt);
 
 	/*视频通道开启fec时进行fec相关的统计打印*/
-	if (m_stStreamCfg.enStreamType == STREAM_VIDEO && m_stStreamCfg.unStreamInfo.stVideoInfo.enFecType != NETADAPTSFU_FECTYPE_NONE)
-	{
-		sprintf(pscSendBuf + strlen(pscSendBuf),
-			"PT:chg         Ssrc:chg       Seq:chg        TS:chg         Size           TimeMs         \n");
-		sprintf(pscSendBuf + strlen(pscSendBuf),
-			"%-4u:%-10u%08x:%-6u%-7u:%-7u%08x:%-6u%-15d%-15d\n",
-			pstFec->uiLastPayloadType, pstFec->uiPtChgCnt,     pstFec->uiLastSsrc,     pstFec->uiSsrcChgCnt,
-			pstFec->usLastSequence, pstFec->uiSeqChgCnt,       pstFec->uiLastTimeStamp, pstFec->uiTsChgCnt, pstFec->uiLastSize,
-			pstFec->uiSpaceTimeMs);
-	}
+	// if (m_stStreamCfg.enStreamType == STREAM_VIDEO && m_stStreamCfg.unStreamInfo.stVideoInfo.enFecType != NETADAPTSFU_FECTYPE_NONE)
+	// {
+	// 	sprintf(pscSendBuf + strlen(pscSendBuf),
+	// 		"PT:chg         Ssrc:chg       Seq:chg        TS:chg         Size           TimeMs         \n");
+	// 	sprintf(pscSendBuf + strlen(pscSendBuf),
+	// 		"%-4u:%-10u%08x:%-6u%-7u:%-7u%08x:%-6u%-15d%-15d\n",
+	// 		pstFec->uiLastPayloadType, pstFec->uiPtChgCnt,     pstFec->uiLastSsrc,     pstFec->uiSsrcChgCnt,
+	// 		pstFec->usLastSequence, pstFec->uiSeqChgCnt,       pstFec->uiLastTimeStamp, pstFec->uiTsChgCnt, pstFec->uiLastSize,
+	// 		pstFec->uiSpaceTimeMs);
+	// }
 
 	/*获取RTP FEC RTX(重传数据) 相关数据的码率，以及RTP数据的帧抖动*/
 	sprintf(pscSendBuf + strlen(pscSendBuf),
@@ -472,12 +467,12 @@ void C_StreamProcess::rtpStatistic(NETADAPT_STATISTIC_RTP_ST* pstRtpInfo, unsign
 	bool bNewFrame = false; /*是否为新的一帧*/
 	if (Base_RtpIsNewerSeq(usSeq, pstRtpInfo->usLastSequence)) /*过滤掉乱序包*/
 	{
-		const bool bNewTimeStamp = Base_RtpIsNewTimestamp(uiTp, pstRtpInfo->uiLastTimeStamp); /*新时戳的帧数据*/
+		//const bool bNewTimeStamp = Base_RtpIsNewTimestamp(uiTp, pstRtpInfo->uiLastTimeStamp); /*新时戳的帧数据*/
 
-		if (m_stStreamCfg.enStreamType == STREAM_AUDIO && bNewTimeStamp)                    /*音频新的seq中有新的时间戳则为新帧*/
-			bNewFrame = true;
-		else if(m_stStreamCfg.enStreamType != STREAM_AUDIO && pstRtpInfo->bLastMark == true) /*视频上一包为mark,这一包则为新帧*/
-			bNewFrame = true;
+		// if (m_stStreamCfg.enStreamType == STREAM_AUDIO && bNewTimeStamp)                    /*音频新的seq中有新的时间戳则为新帧*/
+		// 	bNewFrame = true;
+		// else if(m_stStreamCfg.enStreamType != STREAM_AUDIO && pstRtpInfo->bLastMark == true) /*视频上一包为mark,这一包则为新帧*/
+		// 	bNewFrame = true;
 
 		if (usSeq != (unsigned short)(pstRtpInfo->usLastSequence + 1))  /*seq是否连续*/
 		{
@@ -487,22 +482,22 @@ void C_StreamProcess::rtpStatistic(NETADAPT_STATISTIC_RTP_ST* pstRtpInfo, unsign
 		}
 		else
 		{
-			/*视频seq连续且一帧之内时间戳不同*/
-			if (m_stStreamCfg.enStreamType != STREAM_AUDIO && (!bNewFrame && pstRtpInfo->uiLastTimeStamp != uiTp) )
-			{
-				pstRtpInfo->uiTsChgCnt++;
-				NLOG_ERR("%s Tp Chg OneFrame Inner, lastTp<%u> ---> Tp<%u> Seq<%u> uiTsChgCnt<%d>", logInfo, pstRtpInfo->uiLastTimeStamp, uiTp, usSeq, pstRtpInfo->uiTsChgCnt);
-			}
-			else if(m_stStreamCfg.enStreamType == STREAM_VIDEO && (bNewFrame && !bNewTimeStamp) ) /*新帧但是时间戳没有正向增长*/
-			{
-				pstRtpInfo->uiTsChgCnt++;
-				NLOG_ERR("%s Tp Chg, New Frame But TimeStamp not New, lastTp<%u> ---> Tp<%u> Seq<%u> uiTsChgCnt<%d>", logInfo, pstRtpInfo->uiLastTimeStamp, uiTp, usSeq, pstRtpInfo->uiTsChgCnt);
-			}
-			else if (m_stStreamCfg.enStreamType == STREAM_AUDIO && !bNewTimeStamp) /*音频seq顺序增长，时间戳没有增长则统计时间戳变化*/
-			{
-				pstRtpInfo->uiTsChgCnt++;
-				NLOG_ERR("%s Tp Chg lastTp<%u> ---> Tp<%u> Seq<%u> uiTsChgCnt<%d>", logInfo, pstRtpInfo->uiLastTimeStamp, uiTp, usSeq, pstRtpInfo->uiTsChgCnt);
-			}
+			// /*视频seq连续且一帧之内时间戳不同*/
+			// if (m_stStreamCfg.enStreamType != STREAM_AUDIO && (!bNewFrame && pstRtpInfo->uiLastTimeStamp != uiTp) )
+			// {
+			// 	pstRtpInfo->uiTsChgCnt++;
+			// 	NLOG_ERR("%s Tp Chg OneFrame Inner, lastTp<%u> ---> Tp<%u> Seq<%u> uiTsChgCnt<%d>", logInfo, pstRtpInfo->uiLastTimeStamp, uiTp, usSeq, pstRtpInfo->uiTsChgCnt);
+			// }
+			// else if(m_stStreamCfg.enStreamType == STREAM_VIDEO && (bNewFrame && !bNewTimeStamp) ) /*新帧但是时间戳没有正向增长*/
+			// {
+			// 	pstRtpInfo->uiTsChgCnt++;
+			// 	NLOG_ERR("%s Tp Chg, New Frame But TimeStamp not New, lastTp<%u> ---> Tp<%u> Seq<%u> uiTsChgCnt<%d>", logInfo, pstRtpInfo->uiLastTimeStamp, uiTp, usSeq, pstRtpInfo->uiTsChgCnt);
+			// }
+			// else if (m_stStreamCfg.enStreamType == STREAM_AUDIO && !bNewTimeStamp) /*音频seq顺序增长，时间戳没有增长则统计时间戳变化*/
+			// {
+			// 	pstRtpInfo->uiTsChgCnt++;
+			// 	NLOG_ERR("%s Tp Chg lastTp<%u> ---> Tp<%u> Seq<%u> uiTsChgCnt<%d>", logInfo, pstRtpInfo->uiLastTimeStamp, uiTp, usSeq, pstRtpInfo->uiTsChgCnt);
+			// }
 		}
 
 		pstRtpInfo->usLastSequence = usSeq;
@@ -510,13 +505,13 @@ void C_StreamProcess::rtpStatistic(NETADAPT_STATISTIC_RTP_ST* pstRtpInfo, unsign
 
 		/*视频时，以mark认为一帧已经完整进行记录音频时，以新的时戳为一帧进行记录
 		记录每帧时间，用于后续计算抖动*/
-		if ((m_stStreamCfg.enStreamType != STREAM_AUDIO && bMark) || (m_stStreamCfg.enStreamType == STREAM_AUDIO && bNewFrame))
-		{
-			pstRtpInfo->stRecentFrameJitter.uiRecentFrameReceiveTime[pstRtpInfo->stRecentFrameJitter.uiNowIdx] = uiNow;
-			pstRtpInfo->stRecentFrameJitter.uiNowIdx = (pstRtpInfo->stRecentFrameJitter.uiNowIdx + 1) % NETADAPT_STATISTIC_RECENT_FRAME_CNT;
-			pstRtpInfo->uiSpaceTimeMs = uiNow - pstRtpInfo->uiLastTimeMs;/*两次帧之间的间隔时间*/
-			pstRtpInfo->uiLastTimeMs = uiNow;                                 /*上一个帧的时间*/
-		}
+		// if ((m_stStreamCfg.enStreamType != STREAM_AUDIO && bMark) || (m_stStreamCfg.enStreamType == STREAM_AUDIO && bNewFrame))
+		// {
+		// 	pstRtpInfo->stRecentFrameJitter.uiRecentFrameReceiveTime[pstRtpInfo->stRecentFrameJitter.uiNowIdx] = uiNow;
+		// 	pstRtpInfo->stRecentFrameJitter.uiNowIdx = (pstRtpInfo->stRecentFrameJitter.uiNowIdx + 1) % NETADAPT_STATISTIC_RECENT_FRAME_CNT;
+		// 	pstRtpInfo->uiSpaceTimeMs = uiNow - pstRtpInfo->uiLastTimeMs;/*两次帧之间的间隔时间*/
+		// 	pstRtpInfo->uiLastTimeMs = uiNow;                                 /*上一个帧的时间*/
+		// }
 	}
 
 	if (bNewFrame)
@@ -531,22 +526,22 @@ void C_StreamProcess::rtpStatistic(NETADAPT_STATISTIC_RTP_ST* pstRtpInfo, unsign
 
 
 	/*分析并且记录I帧*/
-	if (bNewFrame && m_stStreamCfg.enStreamType == STREAM_VIDEO && !pstRtpInfo->bIframeInTP)
-	{
-		/*I帧判断要区分H264和H265格式*/
-		bool bVideoEncH265 = m_stStreamCfg.unStreamInfo.stVideoInfo.enVideoType == NETADAPTSFU_VIDEOTYPE_H265 ? true : false;
+	// if (bNewFrame && m_stStreamCfg.enStreamType == STREAM_VIDEO && !pstRtpInfo->bIframeInTP)
+	// {
+	// 	/*I帧判断要区分H264和H265格式*/
+	// 	bool bVideoEncH265 = m_stStreamCfg.unStreamInfo.stVideoInfo.enVideoType == NETADAPTSFU_VIDEOTYPE_H265 ? true : false;
 
-		/*此处的I帧类型检测不会对帧的完整性进行检测，例如，如果这个I帧只有后半段， 那么依然认为是有I帧的*/
-		if (Base_RtpIsKeyFrame(pucDataBuf, uiDataLen, bVideoEncH265))
-		{
-			pstRtpInfo->uiRecvKeyFrameCnt++;                  /*I帧计数增加*/
-			pstRtpInfo->bIframeInTP = true;               /*标记这个帧已经检测到I帧*/
+	// 	/*此处的I帧类型检测不会对帧的完整性进行检测，例如，如果这个I帧只有后半段， 那么依然认为是有I帧的*/
+	// 	if (Base_RtpIsKeyFrame(pucDataBuf, uiDataLen, bVideoEncH265))
+	// 	{
+	// 		pstRtpInfo->uiRecvKeyFrameCnt++;                  /*I帧计数增加*/
+	// 		pstRtpInfo->bIframeInTP = true;               /*标记这个帧已经检测到I帧*/
 
-			/*此处解析只有当sps在I帧最开头时才会进行分辨率解析，如果sps乱序到达，将不会进入该解析逻辑*/
-			/* 解析码流中的分辨率用于上层显示,根据码流中的sps解析分辨率 */
-			Base_RtpGetVideoResolution(&m_uiWidth, &m_uiHeight, pucDataBuf, uiDataLen, bVideoEncH265);
-		}
-	}
+	// 		/*此处解析只有当sps在I帧最开头时才会进行分辨率解析，如果sps乱序到达，将不会进入该解析逻辑*/
+	// 		/* 解析码流中的分辨率用于上层显示,根据码流中的sps解析分辨率 */
+	// 		Base_RtpGetVideoResolution(&m_uiWidth, &m_uiHeight, pucDataBuf, uiDataLen, bVideoEncH265);
+	// 	}
+	// }
 
 	/*记录瞬时带宽，用于后续计算码率*/
 	recentSpeedRecode(&pstRtpInfo->stRecentSpeed, Base_GetTimeTickMs(), uiDataLen);

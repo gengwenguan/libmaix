@@ -8,10 +8,8 @@
 #ifndef __STREAM_PROCESS_H__
 #define __STREAM_PROCESS_H__
 
-#include "netadaptsfu.h"
-#include "rtpbase.h"
+#include "rtpBase.h"
 #include "logAdapt.h"
-#include "NPQosBundle.h"  
 #include <mutex>
 #include <array>
 #include <string>
@@ -132,7 +130,7 @@ typedef struct
 }NETADAPT_IO_RESULT_ST;
 
 /*接口的调用统计信息*/
-typedef struct
+struct NETADAPT_IO_STATISTIC_ST
 {
 	/* RTP RTCP输入接口统计 */
 	NETADAPT_IO_INFO_ST    stInputRtpIOInfo{};
@@ -142,7 +140,7 @@ typedef struct
 	NETADAPT_IO_INFO_ST    stOutputRtpIOInfo{};
 	NETADAPT_IO_INFO_ST    stOutputRtcpIOInfo{};
 
-}NETADAPT_IO_STATISTIC_ST;
+};
 
 
 /*流处理对象,包括流的统计和保存*/
@@ -152,7 +150,7 @@ public:
 	static constexpr unsigned int kNpqRedPt = 126;  //NPQ音频red包pt值
 	static constexpr unsigned int kNpqFecPt = 117;  //NPQ音频fec冗余包pt值
 public:
-	C_StreamProcess(NETADAPTSFU_STREAMCFG_ST *pstStreamCfg);
+	C_StreamProcess();
 	virtual ~C_StreamProcess();
 
 	/** @fn MediaSaveSetParam
@@ -182,7 +180,7 @@ public:
 
 protected:
 	/* 获取NPQ的相关统计状态信息，需在子类C_Npq_Stream中实现 */
-	virtual int GetNpqStat(NPQ_STAT* pstNpqStat) { return 0; }
+	//virtual int GetNpqStat(NPQ_STAT* pstNpqStat) { return 0; }
 
 	/*RTP、RTCP数据包输入、输出信息统计*/
 	void Rtp_Input_Statistic(unsigned char *pucDataBuf, unsigned int uiDataLen);
@@ -230,20 +228,20 @@ private:
 
 private:
 
-	NETADAPTSFU_STREAMCFG_ST             m_stStreamCfg;
+	//NETADAPTSFU_STREAMCFG_ST             m_stStreamCfg;
 
 	/*流输入输出RTP/RTCP统计信息*/
-	NETADAPT_STREAM_INFO_STATISTIC_ST    m_stStreamStatistic;
+	NETADAPT_STREAM_INFO_STATISTIC_ST    m_stStreamStatistic{};
 
 	/*输入输出数据接口的调用统计信息*/
-	NETADAPT_IO_STATISTIC_ST             m_stIOStatistic;
+	NETADAPT_IO_STATISTIC_ST             m_stIOStatistic{};
 
 	/*输入输出流保存*/
-	NETADAPT_WRITEFILE_ST                m_stInputSave;
-	NETADAPT_WRITEFILE_ST                m_stOutputSave;
+	NETADAPT_WRITEFILE_ST                m_stInputSave{};
+	NETADAPT_WRITEFILE_ST                m_stOutputSave{};
 
-	unsigned int                         m_uiWidth;  /* 视频流的分辨率 */
-	unsigned int                         m_uiHeight;
+	unsigned int                         m_uiWidth{0};  /* 视频流的分辨率 */
+	unsigned int                         m_uiHeight{0};
 };
 
 #endif
