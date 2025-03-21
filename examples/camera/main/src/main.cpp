@@ -1,8 +1,6 @@
-
 #if 1
 #include<stdio.h>
 #include<iostream>
-#include <fstream>
 #include <chrono>
 #include <thread>
 #include <signal.h>
@@ -17,17 +15,7 @@
 #include "terminal.h"
 #include "logAdapt.h"
 
-#include "opencv2/core.hpp"
 #include "opencv2/imgproc.hpp"
-#include "opencv2/highgui.hpp"
-#include "opencv2/videoio.hpp"
-#include "opencv2/imgcodecs.hpp"
-#include <opencv2/opencv.hpp>
-#include <opencv2/imgproc.hpp>
-#include <opencv2/imgcodecs/legacy/constants_c.h>
-#include "opencv2/core/types_c.h"
-
-#include <alsa/asoundlib.h>
 
 #define CALC_FPS(tips)                                                                                     \
   {                                                                                                        \
@@ -51,18 +39,25 @@ constexpr int kCamInH = 480;
 constexpr int kDispW = 240;
 constexpr int kDispH = 240;
 
+
+// static void app_handlesig(int signo)
+// {
+//   if (SIGINT == signo || SIGTSTP == signo || SIGTERM == signo || SIGQUIT == signo || SIGPIPE == signo || SIGKILL == signo)
+//   {
+//     g_apprun = false;
+//   }
+// }
+
 bool g_apprun = true;
-static void app_handlesig(int signo)
-{
-  if (SIGINT == signo || SIGTSTP == signo || SIGTERM == signo || SIGQUIT == signo || SIGPIPE == signo || SIGKILL == signo)
-  {
-    g_apprun = false;
-  }
-}
-
-
 int main(int argc, char **argv)
 {
+    auto app_handlesig = [](int signo){
+        if (SIGINT == signo || SIGTSTP == signo || SIGTERM == signo || SIGQUIT == signo || SIGPIPE == signo || SIGKILL == signo)
+        {
+            g_apprun = false;
+        }
+    };
+
     CLOG_INF("main enter!\n");
     std::this_thread::sleep_for(std::chrono::milliseconds(8000));  //启动时先等待一会让设备获取到ip地址和时间
     signal(SIGINT, app_handlesig);
@@ -155,15 +150,6 @@ int main(int argc, char **argv)
     libmaix_cam_destroy(&m_camera1);
     delete pterminal;
 
-    // int err;
-    // snd_pcm_t *capture_handle;// 一个指向PCM设备的句柄
-
-	// if ((err = snd_pcm_open (&capture_handle, argv[1],SND_PCM_STREAM_CAPTURE,0))<0) 
-	// {
-	// 	printf("无法打开音频设备: %s (%s)\n",  argv[1],snd_strerror (err));
-	// 	exit(1);
-	// }
-
 #endif
 
     libmaix_camera_module_deinit();
@@ -172,4 +158,115 @@ int main(int argc, char **argv)
     return 0;
 
 }
+#else
+
+//下方为测试代码部分
+
+#include <alsa/asoundlib.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <math.h>
+#include "rtpBase.h"
+#define BUFFER_SIZE 1920  // 48000 Hz * 2 bytes/sample * 0.020 seconds = 1920 bytes
+#define PERIOD_SIZE 960  // 48000 Hz * 0.020 seconds
+
+void check_error(int err, const char *msg) {
+    if (err < 0) {
+        fprintf(stderr, "Error: %s - %s\n", msg, snd_strerror(err));
+        exit(EXIT_FAILURE);
+    }
+}
+
+// 生成正弦波数据
+void generate_sine_wave(short *buffer, int buffer_size, int sample_rate, float frequency) {
+    float amplitude = 0.01 * 32767;  // 幅度为 0.8 倍的 16 位最大值，避免溢出
+    for (int i = 0; i < buffer_size / 2; i++) {
+        // 计算正弦波的值
+        float sample = amplitude * sinf((2.0f * M_PI * frequency * i) / sample_rate);
+        // 将浮点数样本转换为 16 位整数
+        buffer[i] = (short)sample;
+    }
+}
+
+int main() {
+    // 打开 PCM 设备
+    snd_pcm_t *handle;
+    int err = snd_pcm_open(&handle, "default", SND_PCM_STREAM_PLAYBACK, 0);
+    check_error(err, "Opening PCM device");
+
+    // 设置硬件参数
+    snd_pcm_hw_params_t *params;
+    snd_pcm_hw_params_alloca(&params);
+    snd_pcm_hw_params_any(handle, params);
+
+    // 设置访问模式
+    err = snd_pcm_hw_params_set_access(handle, params, SND_PCM_ACCESS_RW_INTERLEAVED);
+    check_error(err, "Setting access type");
+
+    // 设置样本格式
+    err = snd_pcm_hw_params_set_format(handle, params, SND_PCM_FORMAT_S16_LE);
+    check_error(err, "Setting format");
+
+    // 设置通道数
+    err = snd_pcm_hw_params_set_channels(handle, params, 1);
+    check_error(err, "Setting channels");
+
+    // 设置采样率
+    unsigned int rate = 48000;
+    int dir = 0;
+    err = snd_pcm_hw_params_set_rate_near(handle, params, &rate, &dir);
+    check_error(err, "Setting rate");
+    if (rate != 48000) {
+        fprintf(stderr, "Warning: Sample rate is not 48000 Hz, it is %d Hz\n", rate);
+    }
+
+
+    unsigned int buffer_time = 60 * 1000; //设置60ms缓冲区
+    // 设置缓冲区时间
+    err = snd_pcm_hw_params_set_buffer_time_near(handle, params, &buffer_time, &dir);
+    check_error(err, "Setting buffer time");
+
+    // 设置周期大小
+    unsigned long period_size = PERIOD_SIZE;
+    err = snd_pcm_hw_params_set_period_size_near(handle, params, &period_size, &dir);
+    check_error(err, "Setting period size");
+
+    // 应用硬件参数
+    err = snd_pcm_hw_params(handle, params);
+    check_error(err, "Applying hardware parameters");
+
+    // 准备 PCM 设备
+    err = snd_pcm_prepare(handle);
+    check_error(err, "Preparing PCM device");
+
+    // 创建缓冲区
+    short buffer[BUFFER_SIZE / 2];  // 2 bytes per sample
+
+    // 生成正弦波数据（例如 440 Hz，这是 A4 音）
+    float frequency = 440.0;  // 440 Hz 是标准的 A4 音
+    generate_sine_wave(buffer, BUFFER_SIZE, rate, frequency);
+
+    int starttime = Base_GetTimeTickMs();
+    int count = 0;
+    // 循环播放数据
+    while (true) {
+        printf("time:%d  count:%d\n", Base_GetTimeTickMs() - starttime, count++);
+        err = snd_pcm_writei(handle, buffer, PERIOD_SIZE);
+        if (err == -EPIPE) {
+            // 欠载处理
+            fprintf(stderr, "Underrun occurred\n");
+            snd_pcm_prepare(handle);
+        } else if (err < 0) {
+            check_error(err, "Writing to PCM device");
+        }
+    }
+
+    // 关闭 PCM 设备
+    snd_pcm_close(handle);
+
+    return 0;
+}
+
 #endif

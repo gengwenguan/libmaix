@@ -70,7 +70,7 @@ int C_Terminal::OnOutputH264(unsigned char* data, unsigned int dataLen)
 //音频编码回调的opus数据
 int C_Terminal::OnOutputOpus(unsigned char* data, unsigned int dataLen){
     
-    CLOG_INF("OnOutputOpus %d %d %d %d dataLen%d\n",data[0], data[1],data[2],data[3], dataLen);
+    //CLOG_INF("OnOutputOpus %d %d %d %d dataLen%d\n",data[0], data[1],data[2],data[3], dataLen);
     return 0;
 }
 

@@ -1,5 +1,6 @@
 #include "opusEnc.h"
 #include "logAdapt.h"
+#include "rtpBase.h"
 
 #define PRINT_ERROR(errnum) do { \
     char errbuf[AV_ERROR_MAX_STRING_SIZE]; \
@@ -95,7 +96,6 @@ C_OpusEnc::C_OpusEnc(C_Listener* pListener)
 
     m_bRun = true;
     m_pCaptureEncoderThread = std::unique_ptr<std::thread>(new std::thread( [this]() { this->CaptureEncoder(); }));
-    //AVFifoBuffer *av_fifo_alloc(unsigned int size);
 }
 
 
@@ -132,9 +132,13 @@ void C_OpusEnc::CaptureEncoder()
     //申请输出包
     AVPacket *pkt = av_packet_alloc();
 
+    // int starttime = Base_GetTimeTickMs();
+    // int count = 0;
+
     std::unique_ptr<char[]> captureBuffer = std::unique_ptr<char[]>(new char[PERIOD_SIZE * 2]);
     int err;
     while (m_bRun) {
+        //CLOG_INF("time:%d  count:%d\n", Base_GetTimeTickMs() - starttime, count++);
         // 读取音频数据
         err = snd_pcm_readi(m_capture_handle, captureBuffer.get(), PERIOD_SIZE);
         if (err == -EPIPE) {
@@ -168,7 +172,7 @@ void C_OpusEnc::CaptureEncoder()
             }
 
 
-        CLOG_INF("Sample  %d: %d\n", captureBuffer[0], captureBuffer[PERIOD_SIZE-1]);
+        //CLOG_INF("Sample  %d: %d\n", captureBuffer[0], captureBuffer[PERIOD_SIZE-1]);
         // 编码帧
         frame->data[0] = (unsigned char*)captureBuffer.get();
         frame->nb_samples = 960; // 20ms * 48000Hz = 960 samples
