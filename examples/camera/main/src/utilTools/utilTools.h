@@ -162,6 +162,7 @@ public:
 		}
 		m_pBuf = pBuf + strlen(pBuf);              //之前的字符串保留，再之前字符串尾部追加打印
 		memset(m_pBuf, ' ', pos);                  // 将要格式化输出的内存区域置为空格
+		*(m_pBuf + pos) = '\0';                    // 最后设置文本结束符
 	}
 
 	//使用输出头字符串进行初始化，从header中找到每个子串的起始位置作为后续变量输出的位置
@@ -187,6 +188,8 @@ public:
 		if (m_formats.size() == m_Pos.size()) {
 			m_pBuf = pBuf + strlen(pBuf);              //之前的字符串保留，再之前字符串尾部追加打印
 			memset(m_pBuf, ' ', m_Pos.back());         // 将要格式化输出的内存区域置为空格
+			*(m_pBuf + m_Pos.back()) = '\0';           // 最后设置文本结束符
+
 		}
 	}
 
@@ -195,6 +198,7 @@ public:
 		m_idx = 0;
 		m_pBuf = m_pBuf + strlen(m_pBuf);              //之前的字符串保留，再之前字符串尾部追加打印
 		memset(m_pBuf, ' ', m_Pos.back());             // 将要格式化输出的内存区域置为空格
+		*(m_pBuf + m_Pos.back()) = '\0';               // 最后设置文本结束符
 	}
 
 	//必须保证Print调用的次数和传入的formats数据个数相同。打印string类型变量时要使用c_str()传入
