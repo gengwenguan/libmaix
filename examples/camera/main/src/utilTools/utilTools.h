@@ -8,6 +8,9 @@
 #pragma once
 #include<mutex>
 #include<memory>
+#include<vector>
+#include<cstring>
+#include<string>
 #include<condition_variable>
 
 //读锁持续获取时，可能会导致获取写锁饥饿问题

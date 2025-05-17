@@ -16,9 +16,9 @@
 
 C_FileMng::C_FileMng(C_Listener* pListener)
     :m_pListrner(pListener),
-    m_fileSize(0),
+    m_LastfileSize(0),
     m_bRunFlag(true),
-    m_pThread( new std::thread( [this]() { this->Accept(); }) )
+    m_Thread( std::thread( [this]() { this->Accept(); }) )
 {
     //要先确保存放视频的文件夹存在
     DIR *dir = opendir(kFileDir); // 打开目录
@@ -80,8 +80,9 @@ C_FileMng::~C_FileMng()
         m_fdConnections.clear();
     }    
     m_bRunFlag = false;
-    if(m_pThread != nullptr){
-        m_pThread->join();
+
+    if(m_Thread.joinable()){
+        m_Thread.join();
     }
     if(m_outFile.is_open()){
         m_outFile.close();
@@ -95,19 +96,14 @@ void C_FileMng::InputFileData(unsigned char* data, unsigned int dataLen)
 {
     if(m_outFile.is_open()){
         m_outFile.write((const char*)data, dataLen);
-        m_fileSize += dataLen;
+        m_LastfileSize += dataLen;
         //文件达到最大内存限制时进行关闭，重新创建一个新文件
-        if(m_fileSize >= kMaxFileSize){
+        if(m_LastfileSize >= kMaxFileSize){
             std::lock_guard<std::mutex> lock(m_fileMapMutex);
             m_outFile.close();
-            m_fileSize = 0;
 
             //更新最后一个文件大小
-            if(m_fileMap.size() > 0){
-                std::string needRefreshFile = m_fileMap.rbegin()->first;
-                m_fileMap[needRefreshFile] = GetFileSize(needRefreshFile);
-                CLOG_INF("needRefreshFile = %s, size = %d!\n", needRefreshFile.c_str(), m_fileMap[needRefreshFile]);
-            }
+            m_fileMap.rbegin()->second = m_LastfileSize;
 
             //生成新得到文件路径名
             std::string filePath = GenerateFilePathByNowTime();
@@ -120,6 +116,7 @@ void C_FileMng::InputFileData(unsigned char* data, unsigned int dataLen)
 
             //将新创建的文件放入管理map中
             m_fileMap[filePath] = 0;
+            m_LastfileSize = 0;
             //保证文件数量在最大限制之内,在没有回放客户端连接同时文件数量超过限制时才对过期文件进行删除
             while(m_fdConnections.size() == 0 && m_fileMap.size() > kMaxFileNum){
                 std::string needRemoveFile = m_fileMap.begin()->first;
@@ -201,7 +198,7 @@ int C_FileMng::Accept(){
                 std::lock_guard<std::mutex> lock(m_oMutex);
                 CLOG_INF("accept new socket:%d\n", new_socket);
                 FD_SET(new_socket, &read_fds);
-                m_fdConnections[new_socket] = std::unique_ptr<C_ClientConnect>(new C_ClientConnect(new_socket, m_fileMap, m_fileMapMutex));
+                m_fdConnections[new_socket] = std::unique_ptr<C_ClientConnect>(new C_ClientConnect(this, new_socket));
             }
         }
 
@@ -253,9 +250,14 @@ std::string C_FileMng::GenerateFilePathByNowTime()
 }
 
 //获取文件大小
-unsigned int C_FileMng::GetFileSize(std::string filePath)
+long long C_FileMng::GetFileSize(std::string filePath)
 {
     std::ifstream file(filePath, std::ios::binary);
+    // 检查文件是否打开成功
+    if (!file.is_open()) {
+        std::cerr << "无法打开文件: " << filePath << std::endl;
+        return 0;
+    }
     // 获取文件大小
     file.seekg(0, std::ios::end);
     std::streampos fileSize = file.tellg();

@@ -13,10 +13,11 @@
 #include <mutex>
 #include <set>
 #include <map>
+#include <atomic>
 #include <memory>
 #include "clientConnect.h"
 //#include <alsa/asoundlib.h>
-class C_FileMng
+class C_FileMng : public C_ClientConnect::C_Listener
 {
 private:
     static constexpr const char* kFileDir = "video/";       //存放保存视频文件的路径
@@ -44,21 +45,28 @@ private:
     //根据当前时间生成文件名
     std::string GenerateFilePathByNowTime();
     //获取文件大小
-    unsigned int GetFileSize(std::string filePath);
+    long long GetFileSize(std::string filePath);
+
+    //获取文件map表锁
+    virtual std::mutex& GetfileMapMutex() override { return m_fileMapMutex; }
+    //获取文件map表
+    virtual std::map<std::string, long long>& GetfileMap() override { return m_fileMap; }
+    //获取最后一个文件大小
+    virtual long long GetLastFileSize() override { return m_LastfileSize.load(); }
 private:
-    C_Listener*  m_pListrner;                  //监听器
+    C_Listener*  m_pListrner;                   //监听器
     std::ofstream m_outFile;
-    unsigned int  m_fileSize{0};
+    std::atomic<long long>  m_LastfileSize{0};  //最新文件大小
 
     bool          m_bRunFlag;                  //线程运行标识
-    std::unique_ptr<std::thread> m_pThread;    //接收客户端连接线程
+    std::thread   m_Thread;    //接收客户端连接线程
 
     int           m_server_fd;
     std::mutex    m_oMutex;    //互斥锁
     std::map<int, std::unique_ptr<C_ClientConnect>> m_fdConnections;     //客户端连接集合
 
     std::mutex    m_fileMapMutex;    //互斥锁
-    std::map<std::string, unsigned int> m_fileMap;
+    std::map<std::string, long long> m_fileMap;
 };
 
 

@@ -41,7 +41,7 @@ private:
 private:
     C_Listener*  m_pListrner;                  //监听器
     bool         m_bRunFlag;                   //线程运行标识
-    std::unique_ptr<std::thread> m_pThread;    //接收客户端连接线程
+    std::thread  m_Thread;    //接收客户端连接线程
 
     int          m_server_fd;
 

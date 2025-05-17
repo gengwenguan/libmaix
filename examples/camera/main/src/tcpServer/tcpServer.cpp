@@ -13,15 +13,15 @@
 C_TcpServer::C_TcpServer(C_Listener* pListrner)
     :m_pListrner(pListrner),
     m_bRunFlag(true),
-    m_pThread( new std::thread( [this]() { this->Accept(); }) )
+    m_Thread( std::thread( [this]() { this->Accept(); }) )
 {
 }
 
 C_TcpServer::~C_TcpServer()
 {
     m_bRunFlag = false;
-    if(m_pThread != nullptr){
-        m_pThread->join();
+    if(m_Thread.joinable()){
+        m_Thread.join();
     }
 
     if(m_server_fd>0){

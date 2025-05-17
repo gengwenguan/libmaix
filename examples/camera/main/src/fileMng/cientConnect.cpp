@@ -8,36 +8,36 @@
 #include"clientConnect.h"
 
 
-C_ClientConnect::C_ClientConnect(int socketFd, std::map<std::string, unsigned int>& fileMap, std::mutex& fileMapMutex)
-    :m_sockeFd(socketFd),
-    m_fileMapMutex(fileMapMutex),
-    m_fileMap(fileMap),
-    m_fileMapIter(m_fileMap.begin()),
-    m_sendFile(m_fileMapIter->first.c_str(), std::ios::binary),
-    m_sendFileSize(m_fileMapIter->second),
+C_ClientConnect::C_ClientConnect(C_Listener* pListener,int socketFd)
+    :m_pListener(pListener),
+    m_sockeFd(socketFd),
     m_progress(0),
-    m_bRunFlag(true),
-    m_pThread( new std::thread( [this]() { this->SendFileData(); }) ),
     m_bNeedIframe(false),
     m_IntervalMs(kIntervalDefaultMs)
 {
     //设置日志输出的key，用于区分多个连接产生的打印
     GetLogKey() << "socketFd:" << m_sockeFd;
-    NLOG_INF("m_fileMapIter->first.c_str()=%s m_sendFileSize=%d m_sendFile.is_open()=%d\n", m_fileMapIter->first.c_str(), m_sendFileSize, m_sendFile.is_open());
-    //当文件大小为0时尝试重新获取文件大小
-    if(m_sendFileSize == 0)
-        m_sendFileSize = GetFileSize(m_fileMapIter->first);
+    std::lock_guard<std::mutex> lock(m_pListener->GetfileMapMutex());
+    m_fileMapIter = pListener->GetfileMap().begin();
+    m_sendFile.open(m_fileMapIter->first, std::ios::binary);
+    NLOG_INF("m_fileMapIter->first.c_str()=%s  m_sendFile.is_open()=%d\n", m_fileMapIter->first.c_str(), m_sendFile.is_open());
+
+    m_bRunFlag = true;
+    m_Thread = std::thread( [this]() { this->SendFileTask(); });
+
 }
 
 C_ClientConnect::~C_ClientConnect()
 {
     m_bRunFlag = false;
-    m_pThread->join();
+    if(m_Thread.joinable()){
+        m_Thread.join();
+    }
 
     if(m_sendFile.is_open()){
         m_sendFile.close();
     }
-    NLOG_ERR("this=%p \n", this);
+    NLOG_INF("this=%p \n", this);
 }
 
 //接收到取流端发来的控制消息：进度条拖动、快进、快退、上一个文件、下一个文件
@@ -48,92 +48,102 @@ int C_ClientConnect::RecvCtrlMesssage(char* pData, unsigned int nLen)
         NLOG_ERR("only support nLen == 1, nLen(%d)\n", nLen);
         return -1;
     }
-
-    std::lock_guard<std::mutex> lock(m_fileMapMutex);
     unsigned char message = pData[0];
     NLOG_INF("recv message(%d)\n", message);
-
-    //0~100区间的消息为进度条进度,调整播放位置
-    if(message >= 0 && message <= 100){
-        m_bNeedIframe = true;
-        //先更新文件大小
-        m_sendFileSize = GetFileSize(m_fileMapIter->first);
-        //要调整的偏移位置
-        int offset = m_sendFileSize / 100 * message;
-        //偏移到指定位置
-        m_sendFile.seekg(offset, std::ios::beg);
-        NLOG_INF("seek to <%d>!\n", offset);
-
-    }else if(message == 101){ // 101为快退
-        m_bNeedIframe = true;
-        //先更新文件大小
-        m_sendFileSize = GetFileSize(m_fileMapIter->first);
-        //要调整的偏移位置
-        int offset = m_sendFileSize / kJumpPercentage;
-        //防止偏移越界
-        std::streampos currentPos = m_sendFile.tellg();
-        if(offset > currentPos){
-            m_sendFile.seekg(0, std::ios::beg); //偏移超过文件开头时限制在开头
-            NLOG_INF("Fast back to head m_sendFileSize<%d>!\n", offset, m_sendFileSize);
-        }else{
-            m_sendFile.seekg(-offset, std::ios::cur);
-            NLOG_INF("Fast back offset<%d> m_sendFileSize<%d>!\n", offset, m_sendFileSize);
-        }
-    }else if(message == 102){ // 102为快进
-        m_bNeedIframe = true;
-        //先更新文件大小
-        m_sendFileSize = GetFileSize(m_fileMapIter->first);
-        //要调整的偏移位置
-        int offset = m_sendFileSize / kJumpPercentage;
-        //防止偏移越界
-        std::streampos currentPos = m_sendFile.tellg();
-        if(offset + currentPos > m_sendFileSize){
-            m_sendFile.seekg(0, std::ios::end); //偏移超过文件开头时限制在开头
-            NLOG_INF("Fast forward to file end!\n");
-        }else{
-            m_sendFile.seekg(offset, std::ios::cur);
-            NLOG_INF("Fast forward offset<%d> m_sendFileSize<%d>!\n", offset, m_sendFileSize);
-        }
-    }else if(message == 104){ // 104为上一个文件
-        if(m_sendFile){
-            if(m_fileMapIter == m_fileMap.begin()){
-                NLOG_ERR("m_fileMapIter == m_fileMap.begin()!, cannot jump to the previous file!\n");
-                return -1;
-            }
-            m_sendFile.close();
-            --m_fileMapIter;
-            m_sendFileSize = GetFileSize(m_fileMapIter->first);
-            m_sendFile.open(m_fileMapIter->first.c_str(), std::ios::binary);
-            NLOG_INF("jump to the previous file<%s> m_fileMap.size<%d>!\n", m_fileMapIter->first.c_str(), m_fileMap.size());
-        }else{
-            NLOG_ERR("jump to the previous file m_sendFile == NULL!\n");
-        }
-    }else if(message == 105){ // 105为下一个文件
-        if(m_sendFile){
-            if(++m_fileMapIter == m_fileMap.end()){
-                NLOG_ERR("m_fileMapIter next is m_fileMap.end(), This time the control failed!\n");
-                m_fileMapIter--;
-                return -1;
-            }
-            m_sendFile.close();
-            m_sendFileSize = GetFileSize(m_fileMapIter->first);
-            m_sendFile.open(m_fileMapIter->first.c_str(), std::ios::binary);
-            NLOG_INF("jump to the next file<%s>!\n", m_fileMapIter->first.c_str());
-        }else{
-            NLOG_ERR("jump to the next file m_sendFile == NULL!\n");
-        }
-    }else if(message == 107){ // 107为视频播放加速
-        m_IntervalMs = kIntervalFastPlayMs;
-        NLOG_INF("Fast Forword start m_IntervalMs<%d>!\n", m_IntervalMs);
-    }else if(message == 108){ // 108为停止视频播放加速
-        m_IntervalMs = kIntervalDefaultMs;
-        NLOG_INF("Fast Forword stop m_IntervalMs<%d>!\n", m_IntervalMs);
-    }else{
-        NLOG_ERR("Unsupport message(%d)\n", message);
-        return -1;
-    }
+    std::lock_guard<std::mutex> lock(m_MessageMutex);
+    m_MessageList.push_back(message);
     return 0;
 }
+
+//处理接收到的控制消息
+int C_ClientConnect::HandleCtrlMesssage(){
+    std::list<unsigned char> tmpMessageList;
+    {
+        std::lock_guard<std::mutex> lock(m_MessageMutex);
+        tmpMessageList = std::move(m_MessageList);
+        m_MessageList.clear();
+    }
+
+    for(auto message : tmpMessageList){
+        //0~100区间的消息为进度条进度,调整播放位置
+        if(message >= 0 && message <= 100){
+            m_bNeedIframe = true;
+            //要调整的偏移位置
+            int offset = GetSendFileSize() / 100 * message;
+            //偏移到指定位置
+            m_sendFile.seekg(offset, std::ios::beg);
+            NLOG_INF("seek to <%d>!\n", offset);
+
+        }else if(message == 101){ // 101为快退
+            m_bNeedIframe = true;
+            //要调整的偏移位置
+            int offset = GetSendFileSize() / kJumpPercentage;
+            //防止偏移越界
+            std::streampos currentPos = m_sendFile.tellg();
+            if(offset > currentPos){
+                m_sendFile.seekg(0, std::ios::beg); //偏移超过文件开头时限制在开头
+                NLOG_INF("Fast back to head offset<%d>!\n", offset);
+            }else{
+                m_sendFile.seekg(-offset, std::ios::cur);
+                NLOG_INF("Fast back offset<%d>!\n", offset);
+            }
+        }else if(message == 102){ // 102为快进
+            m_bNeedIframe = true;
+            long long SendFileSize = GetSendFileSize();
+            //要调整的偏移位置
+            int offset = SendFileSize / kJumpPercentage;
+            //防止偏移越界
+            std::streampos currentPos = m_sendFile.tellg();
+            if(offset + currentPos > SendFileSize){
+                m_sendFile.seekg(0, std::ios::end); //偏移超过文件开头时限制在开头
+                NLOG_INF("Fast forward to file end!\n");
+            }else{
+                m_sendFile.seekg(offset, std::ios::cur);
+                NLOG_INF("Fast forward offset<%d> SendFileSize<%d>!\n", offset, SendFileSize);
+            }
+        }else if(message == 104){ // 104为上一个文件
+            if(m_sendFile){
+                std::lock_guard<std::mutex> lock(m_pListener->GetfileMapMutex());
+                if(m_fileMapIter == m_pListener->GetfileMap().begin()){
+                    NLOG_ERR("m_fileMapIter == m_fileMap.begin()!, cannot jump to the previous file!\n");
+                    return -1;
+                }
+                m_sendFile.close();
+                --m_fileMapIter;
+                m_sendFile.open(m_fileMapIter->first.c_str(), std::ios::binary);
+                NLOG_INF("jump to the previous file<%s>!\n", m_fileMapIter->first.c_str());
+            }else{
+                NLOG_ERR("jump to the previous file m_sendFile == NULL!\n");
+            }
+        }else if(message == 105){ // 105为下一个文件
+            if(m_sendFile){
+                std::lock_guard<std::mutex> lock(m_pListener->GetfileMapMutex());
+                if(++m_fileMapIter == m_pListener->GetfileMap().end()){
+                    NLOG_ERR("m_fileMapIter next is m_fileMap.end(), This time the control failed!\n");
+                    m_fileMapIter--;
+                    return -1;
+                }
+                m_sendFile.close();
+                m_sendFile.open(m_fileMapIter->first.c_str(), std::ios::binary);
+                NLOG_INF("jump to the next file<%s>!\n", m_fileMapIter->first.c_str());
+            }else{
+                NLOG_ERR("jump to the next file m_sendFile == NULL!\n");
+            }
+        }else if(message == 107){ // 107为视频播放加速
+            m_IntervalMs = kIntervalFastPlayMs;
+            NLOG_INF("Fast Forword start m_IntervalMs<%d>!\n", m_IntervalMs);
+        }else if(message == 108){ // 108为停止视频播放加速
+            m_IntervalMs = kIntervalDefaultMs;
+            NLOG_INF("Fast Forword stop m_IntervalMs<%d>!\n", m_IntervalMs);
+        }else{
+            NLOG_ERR("Unsupport message(%d)\n", message);
+            return -1;
+        }
+    }
+
+    return 0;
+}
+    
 
 //向客户端通过网络发送NAL数据
 int C_ClientConnect::SendNal(char* pData, unsigned int nLen)
@@ -157,13 +167,15 @@ int C_ClientConnect::SendNal(char* pData, unsigned int nLen)
     return ret;
 }
 
-void C_ClientConnect::SendFileData()
+void C_ClientConnect::SendFileTask()
 {
     //return;
     // 查找 NAL 起始码的 lambda 表达式
     auto findNALStart = [](char* buffer, size_t bufLen, size_t& startPos) -> bool {
         for (size_t i = 0; i < bufLen - 3; ++i) {
-            if (buffer[i] == 0x00 && buffer[i + 1] == 0x00 && buffer[i + 2] == 0x00 && buffer[i + 3] == 0x01) {
+            // 检测4字节或3字节起始码
+            if (buffer[i] == 0x00 && buffer[i + 1] == 0x00 && 
+                (buffer[i + 2] == 0x01 || (buffer[i + 2] == 0x00 && buffer[i + 3] == 0x01))) {
                 startPos = i;
                 return true;
             }
@@ -171,35 +183,41 @@ void C_ClientConnect::SendFileData()
         return false;
     };
 
-    std::vector<char> nalBuffer;             //完整NAL单元缓冲区
+    //存放完整NAL单元缓冲区
+    std::vector<char> nalBuffer;             
     while(m_bRunFlag){
 
-        std::vector<char> buffer(kTmpBuffSize);
-        std::streamsize bytesRead;
-        {
-            std::lock_guard<std::mutex> lock(m_fileMapMutex);
-            if(m_sendFile.eof()){
-                m_sendFile.close();  //某个文件读取到末尾了关闭该文件，打开下一个文件，让客户端依次播放录制的视频文件
-                {
-                    //最后一个文件也播放完毕时跳回到第一个文件
-                    if(++m_fileMapIter == m_fileMap.end()){
-                        NLOG_ERR("Failed m_fileMapIter == m_fileMap.end() , goto first file!\n");
-                        m_fileMapIter = m_fileMap.begin();
-                    }
-                }
-                m_sendFile.open(m_fileMapIter->first.c_str(), std::ios::binary);
-                NLOG_INF("Play the next file<%s>!\n", m_fileMapIter->first.c_str());
-            }
+        //先处理远端发来的控制信令
+        HandleCtrlMesssage();
 
-            //文件中读取部分数据
-            m_sendFile.read(buffer.data(), kTmpBuffSize);
-            bytesRead = m_sendFile.gcount();
-            std::streampos currentPos = m_sendFile.tellg();
-            m_progress = (int)((double)currentPos / m_sendFileSize * 100);
-            m_progress = std::min(m_progress, 100);
+        //从文件中读取数据的缓冲区
+        std::vector<char> buffer(kTmpBuffSize);
+   
+        if(m_sendFile.eof()){
+            m_sendFile.close();  //某个文件读取到末尾了关闭该文件，打开下一个文件，让客户端依次播放录制的视频文件
+            {
+                std::lock_guard<std::mutex> lock(m_pListener->GetfileMapMutex());
+                //最后一个文件也播放完毕时重新播放该文件
+                if(++m_fileMapIter == m_pListener->GetfileMap().end()){
+                    NLOG_WRN("Replay last file!\n");
+                    --m_fileMapIter; // = m_pListener->GetfileMap().begin();
+                }
+            }
+            m_sendFile.open(m_fileMapIter->first, std::ios::binary);
+            NLOG_INF("Play the next file<%s>!\n", m_fileMapIter->first.c_str());
         }
+
+        
          //NLOG_INF("m_progress = %d!\n", m_progress);
 
+        //文件中读取部分数据
+        m_sendFile.read(buffer.data(), kTmpBuffSize);
+        std::streamsize bytesRead = m_sendFile.gcount();
+
+        //计算文件播放进度
+        std::streampos currentPos = m_sendFile.tellg();
+        m_progress = (int)((double)currentPos / GetSendFileSize() * 100);
+        m_progress = std::min(m_progress, 100);
 
         if (bytesRead > 0) {
             //调整缓冲区为实际读取数据大小
@@ -264,5 +282,14 @@ unsigned int C_ClientConnect::GetFileSize(std::string filePath)
     file.seekg(0, std::ios::beg);
     file.close();
 
+    return fileSize;
+}
+
+//获取当前正在发送文件大小
+long long C_ClientConnect::GetSendFileSize(){
+    std::lock_guard<std::mutex> lock(m_pListener->GetfileMapMutex());
+    auto it = m_fileMapIter; 
+    ++it;   //判断当前迭代器是不是最后一个map元素
+    long long fileSize = it == m_pListener->GetfileMap().end() ? m_pListener->GetLastFileSize() : m_fileMapIter->second;
     return fileSize;
 }

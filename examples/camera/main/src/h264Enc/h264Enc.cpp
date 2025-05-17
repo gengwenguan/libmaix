@@ -134,7 +134,7 @@ C_H264Enc::NALUnitType C_H264Enc::GetNALType(unsigned char* data, unsigned int d
     } else if (dataLen >= 3 && data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01) {
         pos = 3;
     } else {
-        CLOG_INF("Invalid NAL unit format.\n");
+        CLOG_INF("Invalid NAL unit format. dataLen.%d %d %d %d %d\n", dataLen, data[0], data[1], data[2], data[3]);
         return NAL_UNKNOWN; // 无效的NAL单元类型
     }
 
