@@ -34,9 +34,15 @@ public:
     //下放H264数据,发送给每个连接的客户端
     int SendH264(unsigned char* pData, unsigned int nLen);
 
+    //下放opus数据,发送给每个连接的客户端
+    int SendOpus(unsigned char* pData, unsigned int nLen);
+
 private:
     //接收客户端连接
     int Accept();
+
+    //下放媒体数据,发送给每个连接的客户端 flag = 0-音频 1-视频
+    int SendMedia(unsigned char* pData, unsigned int nLen, char flag);
 
 private:
     C_Listener*  m_pListrner;                  //监听器

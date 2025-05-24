@@ -24,10 +24,10 @@ public:
     C_Terminal(unsigned int Wight, unsigned int Hight);
     ~C_Terminal();
 
-    //送人采集数据
+    //送入采集数据
     int InputRgb888(unsigned char* inputData);
 
-    //送人采集数据
+    //送入采集数据
     int InputNv21(unsigned char* inputData);
 
     //获取设备的ipv4地址

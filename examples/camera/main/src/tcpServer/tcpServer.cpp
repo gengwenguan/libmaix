@@ -38,18 +38,18 @@ C_TcpServer::~C_TcpServer()
     CLOG_INF("~C_TcpServer()\n");
 }
 
-//下放H264数据给所有连接的客户端
-int C_TcpServer::SendH264(unsigned char* pData, unsigned int nLen)
-{
-    //return 0;//临时直接返回
+
+//下放媒体数据,发送给每个连接的客户端 flag = 0-音频 1-视频
+int C_TcpServer::SendMedia(unsigned char* pData, unsigned int nLen, char flag){
     int ret = 0;
     std::lock_guard<std::mutex> lock(m_oMutex);
     for(auto it = m_fdSet.begin(); it != m_fdSet.end();){
         // 转换整数的字节序为网络字节序
-        int networkNumber = htonl(nLen);
+        int networkNumber = htonl(nLen+1);
         //先将一帧H264数据的长度发送给客户端，长度为4个字节
         ret = send(*it, &networkNumber, sizeof(networkNumber), MSG_NOSIGNAL);
         if(ret>0){
+            send(*it, &flag, 1, MSG_NOSIGNAL);
             //再将实际的H264数据发送给客户端
             ret = send(*it, pData, nLen, MSG_NOSIGNAL);
         }
@@ -65,6 +65,16 @@ int C_TcpServer::SendH264(unsigned char* pData, unsigned int nLen)
         }
     }
     return 0;
+}
+
+//下放H264数据给所有连接的客户端
+int C_TcpServer::SendH264(unsigned char* pData, unsigned int nLen){
+    return SendMedia(pData, nLen, 1);
+}
+
+//下放opus数据,发送给每个连接的客户端
+int C_TcpServer::SendOpus(unsigned char* pData, unsigned int nLen){
+    return SendMedia(pData, nLen, 0);
 }
 
 int C_TcpServer::Accept(){

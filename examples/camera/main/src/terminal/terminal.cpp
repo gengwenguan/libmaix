@@ -23,7 +23,7 @@ C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight)
 C_Terminal::~C_Terminal(){
 }
 
-//送人采集数据
+//送入采集数据
 int C_Terminal::InputRgb888(unsigned char* inputData)
 {
     rgb888ToNv21(inputData, m_pNv12Buff.get(), m_Wight, m_Hight);
@@ -31,7 +31,7 @@ int C_Terminal::InputRgb888(unsigned char* inputData)
     return InputNv21(m_pNv12Buff.get());
 }
 
-//送人采集数据
+//送入采集数据
 int C_Terminal::InputNv21(unsigned char* inputData)
 {
     return m_pH264Enc->InputData(inputData);
@@ -69,9 +69,9 @@ int C_Terminal::OnOutputH264(unsigned char* data, unsigned int dataLen)
 
 //音频编码回调的opus数据
 int C_Terminal::OnOutputOpus(unsigned char* data, unsigned int dataLen){
-    
     //CLOG_INF("OnOutputOpus %d %d %d %d dataLen%d\n",data[0], data[1],data[2],data[3], dataLen);
-    return 0;
+    //通过tcp将opus音频数据发送给客户端
+    return m_pTcpServer->SendOpus(data, dataLen);
 }
 
 /*新客户端连接事件*/
