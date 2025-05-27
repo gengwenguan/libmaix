@@ -44,7 +44,7 @@ void C_LogAdapt::LogInner(const char *pscLevel, const char *pscFile, const char 
 	vsnprintf(ascLogBuf, kMaxLogLen, ascFormat, stLogAp);
 	va_end(stLogAp);
 
-	std::cout << ascLogBuf << std::endl; //输出详细信息日志
+	std::cout << ascLogBuf; //输出详细信息日志
 
 	//在控制日志写入文件时将日志写入文件中
 	if(true){ 

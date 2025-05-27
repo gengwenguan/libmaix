@@ -10,9 +10,10 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include"logAdapt.h"
-#include"fileMng.h"
-#include"logAdapt.h"
+#include "logAdapt.h"
+#include "fileMng.h"
+#include "logAdapt.h"
+#include "h264Enc.h"
 
 C_FileMng::C_FileMng(C_Listener* pListener)
     :m_pListrner(pListener),
@@ -44,24 +45,44 @@ C_FileMng::C_FileMng(C_Listener* pListener)
             std::string filePath = std::string(kFileDir) + fileName;
 
             unsigned int fileSize =  GetFileSize(filePath);
-            if(fileSize > 1024){
-                //将目录下原本就存在的文件大小信息放入文件map中，忽略过小文件
-                m_fileMap[filePath] = fileSize;
-            }else{
+
+            if(fileSize < 10240){
                 remove(filePath.c_str());  //删除较小的文件
+            }else{
+                //将I帧位置信息先从文件中读出来存入对应的map表中管理
+                std::ifstream tmpFile(filePath.c_str(), std::ios::out | std::ios::binary);
+                if(tmpFile.is_open()){
+                    std::vector<long long> buffer(100, 0);
+                    tmpFile.read((char *)buffer.data(), kMoovHeadLen);
+                    tmpFile.close();
+
+                    //判断I帧位置信息是否存在，不存在时该文件无法快进快退，拖动播放，对文件进行删除
+                    if(std::all_of(buffer.begin(), buffer.end(), [](long long num) { return num == 0; })){
+                        remove(filePath.c_str()); 
+                    }else{
+                        m_fileMap[filePath] = buffer; //只保留带有I帧位置信息头的文件
+                    }
+                }
             }
         }
     }
     closedir(dir); // 关闭目录
 
-    std::string filePath = GenerateFilePathByNowTime();
-    CLOG_INF("filePath = %s!\n", filePath.c_str());
+    m_outfilePath = GenerateFilePathByNowTime();
+    CLOG_INF("filePath = %s!\n", m_outfilePath.c_str());
 
+    std::lock_guard<std::mutex> locker(m_outFileMutex);
     //构造时先创建出来写入文件对象
-    m_outFile.open(filePath.c_str(), std::ios::out | std::ios::binary);
+    m_outFile.open(m_outfilePath.c_str(), std::ios::out | std::ios::binary);
+    //使用vector创建并将I帧位置头初始化为全零
+    std::vector<long long> buffer(100, 0);
+    m_outFile.write((char*)buffer.data(), kMoovHeadLen);
+    m_LastfileSize += kMoovHeadLen;
+    //使用vector创建并将文件中I帧位置头初始化为全零
+    m_fileMap[m_outfilePath] = buffer;
 
     //将新创建的文件放入管理map中
-    m_fileMap[filePath] = 0;
+    //m_fileMap[filePath] = 0;
     //保证文件数量在最大限制之内,在没有回放客户端连接同时文件数量超过限制时才对过期文件进行删除
     while(m_fdConnections.size() == 0 && m_fileMap.size() > kMaxFileNum){
         std::string needRemoveFile = m_fileMap.begin()->first;
@@ -84,7 +105,17 @@ C_FileMng::~C_FileMng()
     if(m_Thread.joinable()){
         m_Thread.join();
     }
+    std::lock_guard<std::mutex> lock(m_outFileMutex);
     if(m_outFile.is_open()){
+        //均匀抽取100个I帧位置
+        auto IdrPos = UniformResizeTo100(m_AllIdrPos);
+
+        for (size_t i = 0; i < IdrPos.size(); ++i) {
+            CLOG_INF("IdrPos[%d] = %lld\n", i, IdrPos[i]);
+        }
+        //将抽取的100个I帧位置写入文件头中
+        m_outFile.seekp(0, std::ios::beg);
+        m_outFile.write(reinterpret_cast<const char*>(IdrPos.data()), IdrPos.size() * sizeof(long long));
         m_outFile.close();
     }
 
@@ -92,31 +123,63 @@ C_FileMng::~C_FileMng()
 }
 
 //送入文件数据
-void C_FileMng::InputFileData(unsigned char* data, unsigned int dataLen)
+void C_FileMng::InputFileData(unsigned char* data, unsigned int dataLen, char flag)
 {
+    std::lock_guard<std::mutex> lock(m_outFileMutex);
     if(m_outFile.is_open()){
-        m_outFile.write((const char*)data, dataLen);
-        m_LastfileSize += dataLen;
+        if(flag == 1){ //如果是视频文件将I帧在文件中的位置进行存储
+            auto type = C_H264Enc::GetNALType(data, dataLen);
+            if(type == C_H264Enc::NAL_SPS || type == C_H264Enc::NAL_IDR_PICTURE){
+
+                m_AllIdrPos.push_back(m_LastfileSize.load());  
+                //CLOG_INF("m_AllIdrPos.push_back! size=%d last=%lld\n", m_AllIdrPos.size(), m_LastfileSize.load());
+            }
+            // if(type == C_H264Enc::NAL_SPS){
+            //     CLOG_INF("type == C_H264Enc::NAL_SPS!\n");
+            // }
+            // if(type == C_H264Enc::NAL_IDR_PICTURE){
+            //     CLOG_INF("type == C_H264Enc::NAL_IDR_PICTURE!\n");
+            // }
+        }
+        unsigned int allDataLen = dataLen+1;
+        m_outFile.write((const char*)&allDataLen, sizeof(unsigned int));     //写入后面数据块长度
+        m_outFile.write((const char*)&flag, 1);                              //写入一个字节标志位信息
+        m_outFile.write((const char*)data, dataLen);                         //写入实际音视频负载数据
+        m_LastfileSize += dataLen + sizeof(unsigned int) + 1;  //文件长度要统计到所有写入的数据
         //文件达到最大内存限制时进行关闭，重新创建一个新文件
         if(m_LastfileSize >= kMaxFileSize){
             std::lock_guard<std::mutex> lock(m_fileMapMutex);
+            //均匀抽取100个I帧位置
+            auto IdrPos = UniformResizeTo100(m_AllIdrPos);
+
+            for (size_t i = 0; i < IdrPos.size(); ++i) {
+                CLOG_INF("IdrPos[%d] = %lld\n", i, IdrPos[i]);
+            }
+            //将抽取的100个I帧位置写入文件头中
+            m_outFile.seekp(0, std::ios::beg);
+            m_outFile.write(reinterpret_cast<const char*>(IdrPos.data()), IdrPos.size() * sizeof(long long));
+            //map中也存一份，I帧位置信息
+            m_fileMap[m_outfilePath] = IdrPos;
             m_outFile.close();
 
-            //更新最后一个文件大小
-            m_fileMap.rbegin()->second = m_LastfileSize;
 
             //生成新得到文件路径名
-            std::string filePath = GenerateFilePathByNowTime();
-            CLOG_INF("filePath = %s!\n", filePath.c_str());
+            std::string m_outfilePath = GenerateFilePathByNowTime();
+            CLOG_INF("Generate new filePath = %s!\n", m_outfilePath.c_str());
 
             //新创建并打开一个文件
-            m_outFile.open(filePath.c_str(), std::ios::out | std::ios::binary);
+            m_outFile.open(m_outfilePath.c_str(), std::ios::out | std::ios::binary);
             //回调通知新文件创建
             m_pListrner->OnNewFileCreate();
-
-            //将新创建的文件放入管理map中
-            m_fileMap[filePath] = 0;
+            m_AllIdrPos.clear();
             m_LastfileSize = 0;
+
+            //使用vector创建并将文件中I帧位置头初始化为全零
+            std::vector<long long> buffer(100, 0);
+            m_outFile.write((char*)buffer.data(), kMoovHeadLen);
+            m_fileMap[m_outfilePath] = buffer;
+            m_LastfileSize += kMoovHeadLen;
+            
             //保证文件数量在最大限制之内,在没有回放客户端连接同时文件数量超过限制时才对过期文件进行删除
             while(m_fdConnections.size() == 0 && m_fileMap.size() > kMaxFileNum){
                 std::string needRemoveFile = m_fileMap.begin()->first;
@@ -124,7 +187,6 @@ void C_FileMng::InputFileData(unsigned char* data, unsigned int dataLen)
                 m_fileMap.erase(needRemoveFile); //删除管理map中的文件
                 CLOG_INF("needRemoveFile = %s\n", needRemoveFile.c_str());
             }
-
         }
     }else{
         CLOG_ERR("m_outFile not open!\n");
@@ -204,7 +266,7 @@ int C_FileMng::Accept(){
 
         {
             std::lock_guard<std::mutex> lock(m_oMutex);
-            //收到某条客户端连接发来的消息,目前预览端的控制消息长度为一个字节
+            //收到某条客户端连接发来的消息,目前回放控制消息长度为一个字节
             char buffer[1];
             for(auto iter = m_fdConnections.begin(); iter != m_fdConnections.end(); ){
                 int fd = iter->first;
@@ -265,4 +327,45 @@ long long C_FileMng::GetFileSize(std::string filePath)
     file.close();
 
     return fileSize;
+}
+
+std::vector<long long> C_FileMng::UniformResizeTo100(const std::vector<long long>& IdrPos) {
+    const size_t targetSize = 100;
+    std::vector<long long> result;
+    
+    if (IdrPos.empty()) {
+        return std::vector<long long>(targetSize, 0);
+    }
+    
+    result.reserve(targetSize);
+    
+    if (IdrPos.size() < targetSize) {
+        // 扩展模式：使用最近邻插值
+        for (size_t i = 0; i < targetSize; ++i) {
+            // 计算在原始vector中的位置
+            double pos = (double)i / (targetSize - 1) * (IdrPos.size() - 1);
+            size_t idx = static_cast<size_t>(pos + 0.5); // 四舍五入到最近的索引
+            
+            // 确保不越界
+            idx = std::min(idx, IdrPos.size() - 1);
+            result.push_back(IdrPos[idx]);
+        }
+    } else if (IdrPos.size() > targetSize) {
+        // 抽取模式：均匀选择现有值
+        double step = static_cast<double>(IdrPos.size() - 1) / (targetSize - 1);
+        
+        for (size_t i = 0; i < targetSize; ++i) {
+            double pos = i * step;
+            size_t idx = static_cast<size_t>(pos + 0.5); // 四舍五入到最近的索引
+            
+            // 确保不越界
+            idx = std::min(idx, IdrPos.size() - 1);
+            result.push_back(IdrPos[idx]);
+        }
+    } else {
+        // 正好100个元素
+        return IdrPos;
+    }
+    
+    return result;
 }

@@ -31,7 +31,6 @@ C_TcpServer::~C_TcpServer()
         }
         CLOG_INF("m_fdSet.clear();\n");
         m_fdSet.clear();
-        close(m_server_fd);
         //shutdown(m_server_fd, SHUT_RDWR);  // 关闭监听套接字
     }
 
@@ -136,6 +135,9 @@ int C_TcpServer::Accept(){
             }
         }
     }
+
+    //shutdown(m_server_fd, SHUT_RDWR);
+    close(m_server_fd);
 
     CLOG_INF("End accepted\n");
 

@@ -16,6 +16,7 @@
 #include <memory>
 #include <atomic>
 #include <list>
+#include <vector>
 #include"logAdapt.h"
 //#include <alsa/asoundlib.h>
 
@@ -35,9 +36,12 @@ public:
         //获取文件map表锁
         virtual std::mutex& GetfileMapMutex() = 0;
         //获取文件map表
-        virtual std::map<std::string, long long>& GetfileMap() = 0;
+        virtual std::map<std::string, std::vector<long long>>& GetfileMap() = 0;
         /*获取最新一个文件的大小*/
         virtual long long GetLastFileSize() = 0;
+
+        //获取临时100I帧位置
+        virtual std::vector<long long> GetTmpIdrPos100() = 0;
     };
 public:
     C_ClientConnect(C_Listener* pListener, int sockeFd);
@@ -50,32 +54,30 @@ private:
     int HandleCtrlMesssage();
     //向回放客户端发送存储的视频文件数据
     void SendFileTask();
-    //向客户端通过网络发送NAL数据
-    int SendNal(char* pData, unsigned int nLen);
+    //向客户端通过网络发送Chuck数据
+    int SendChuck(char* pData, unsigned int nLen);
 
-    //获取文件大小
-    unsigned int GetFileSize(std::string filePath);
-
-    //获取当前正在发送文件大小
-    long long GetSendFileSize();
+    //检查是否到达文件结尾，如果到达则打开新的文件
+    bool CheckSendFileEof();
+    //最新生成的文件实时获取
+    //void GetIdrPos100();
 
 private:
     C_Listener*    m_pListener;
     int            m_sockeFd;
 
     //文件迭代器，指向文件管理类里面的文件map
-    std::map<std::string, long long>::iterator  m_fileMapIter;
+    std::map<std::string, std::vector<long long>>::iterator  m_fileMapIter;
 
     std::ifstream m_sendFile;                  //当前正在发送的文件
-    int           m_progress;                  //当前发送位置占总位置的百分比[0~100]
+    std::vector<long long>  m_IdrPos100 = std::vector<long long>(100); //I帧在文件中均匀的100个偏移位置
+    char           m_progress;                  //当前发送位置占总位置的百分比[0~100]
 
     std::atomic<bool>            m_bRunFlag;   //线程运行标识
     std::thread                  m_Thread;     //接收客户端连接线程
 
     std::mutex               m_MessageMutex;    //消息列表锁
     std::list<unsigned char> m_MessageList;
-
-    bool          m_bNeedIframe;               //需要关键帧，被取流客户端快进或者快退时或者拖动进度条时保证第一帧为关键帧
 
     int           m_IntervalMs;                //两帧间隔时间
 };

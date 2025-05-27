@@ -46,7 +46,7 @@ int C_Terminal::OnOutputH264(unsigned char* data, unsigned int dataLen)
     //std::cout << "dataLen:" << dataLen << std::endl;
 
     //文件数据进行保存管理
-    m_pFileMng->InputFileData(data, dataLen);
+    m_pFileMng->InputFileData(data, dataLen, 1);
 
     //此处可控制h264文件写入文件，用于临时测试数据是否正常
 	if(false){ 
@@ -70,7 +70,10 @@ int C_Terminal::OnOutputH264(unsigned char* data, unsigned int dataLen)
 //音频编码回调的opus数据
 int C_Terminal::OnOutputOpus(unsigned char* data, unsigned int dataLen){
     //CLOG_INF("OnOutputOpus %d %d %d %d dataLen%d\n",data[0], data[1],data[2],data[3], dataLen);
-    //通过tcp将opus音频数据发送给客户端
+    //文件数据进行保存管理
+    m_pFileMng->InputFileData(data, dataLen, 0);
+
+    //通过tcp将opus音频数据发送给正在连接预览画面的客户端
     return m_pTcpServer->SendOpus(data, dataLen);
 }
 
