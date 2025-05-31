@@ -23,7 +23,7 @@ C_TcpServer::~C_TcpServer()
     if(m_Thread.joinable()){
         m_Thread.join();
     }
-
+    
     if(m_server_fd>0){
         std::lock_guard<std::mutex> lock(m_oMutex);
         for(auto it = m_fdSet.begin(); it != m_fdSet.end(); ++it){
@@ -33,6 +33,7 @@ C_TcpServer::~C_TcpServer()
         m_fdSet.clear();
         //shutdown(m_server_fd, SHUT_RDWR);  // 关闭监听套接字
     }
+    close(m_server_fd);
 
     CLOG_INF("~C_TcpServer()\n");
 }
@@ -137,7 +138,6 @@ int C_TcpServer::Accept(){
     }
 
     //shutdown(m_server_fd, SHUT_RDWR);
-    close(m_server_fd);
 
     CLOG_INF("End accepted\n");
 

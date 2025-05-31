@@ -26,7 +26,7 @@ class C_ClientConnect : public C_LogAdapt
 private:
     static constexpr int kTmpBuffSize = 4096;      //临时缓冲区大小
     static constexpr int kIntervalDefaultMs = 30;  //视频正常传输时两帧间隔时间
-    static constexpr int kIntervalFastPlayMs = 7;  //视频加速播放时两帧间隔时间
+    static constexpr int kIntervalFastPlayMs = 10;  //视频加速播放时两帧间隔时间
     static constexpr int kJumpPercentage = 300;    //快进或者快退的比例，300的话每次前进或者后退整个文件的1/300
 public:
     class C_Listener

@@ -52,11 +52,13 @@ private:
     unsigned int m_Wight;
     unsigned int m_Hight;
 
-    std::unique_ptr<C_H264Enc>   m_pH264Enc;
-    std::unique_ptr<C_OpusEnc>   m_pOpusEnc;
+    std::unique_ptr<unsigned char[]> m_pNv12Buff;
+
     std::unique_ptr<C_TcpServer> m_pTcpServer;
     std::unique_ptr<C_FileMng>   m_pFileMng;
+    std::unique_ptr<C_H264Enc>   m_pH264Enc;
+    std::unique_ptr<C_OpusEnc>   m_pOpusEnc;
 
-    std::unique_ptr<unsigned char[]> m_pNv12Buff;
+
 
 };

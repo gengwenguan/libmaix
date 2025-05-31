@@ -110,9 +110,9 @@ C_FileMng::~C_FileMng()
         //均匀抽取100个I帧位置
         auto IdrPos = UniformResizeTo100(m_AllIdrPos);
 
-        for (size_t i = 0; i < IdrPos.size(); ++i) {
-            CLOG_INF("IdrPos[%d] = %lld\n", i, IdrPos[i]);
-        }
+        // for (size_t i = 0; i < IdrPos.size(); ++i) {
+        //     CLOG_INF("IdrPos[%d] = %lld\n", i, IdrPos[i]);
+        // }
         //将抽取的100个I帧位置写入文件头中
         m_outFile.seekp(0, std::ios::beg);
         m_outFile.write(reinterpret_cast<const char*>(IdrPos.data()), IdrPos.size() * sizeof(long long));
@@ -152,9 +152,9 @@ void C_FileMng::InputFileData(unsigned char* data, unsigned int dataLen, char fl
             //均匀抽取100个I帧位置
             auto IdrPos = UniformResizeTo100(m_AllIdrPos);
 
-            for (size_t i = 0; i < IdrPos.size(); ++i) {
-                CLOG_INF("IdrPos[%d] = %lld\n", i, IdrPos[i]);
-            }
+            // for (size_t i = 0; i < IdrPos.size(); ++i) {
+            //     CLOG_INF("IdrPos[%d] = %lld\n", i, IdrPos[i]);
+            // }
             //将抽取的100个I帧位置写入文件头中
             m_outFile.seekp(0, std::ios::beg);
             m_outFile.write(reinterpret_cast<const char*>(IdrPos.data()), IdrPos.size() * sizeof(long long));

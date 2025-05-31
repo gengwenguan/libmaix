@@ -22,7 +22,7 @@ class C_FileMng : public C_ClientConnect::C_Listener
 private:
     static constexpr const char* kFileDir = "video/";       //存放保存视频文件的路径
     static constexpr int kMaxFileNum = 10;                  //最多保存的文件数量
-    static constexpr unsigned int kMaxFileSize = 1024 * 5000; //1024 * 1024 * 1024; //每个文件最大容量1G
+    static constexpr unsigned int kMaxFileSize = 1024 * 1024 * 1024; //每个文件最大容量1G
     static constexpr int kFileMngPort  = 56060;             //文件管理服务监听端口
     static constexpr int kMoovHeadLen  = 100 * sizeof(long long); //文件moov头长度，其中用来保存均匀的100个I帧位置
 public:

@@ -24,9 +24,9 @@ C_ClientConnect::C_ClientConnect(C_Listener* pListener,int socketFd)
 
     //先读取文件中存储的I帧位置
     m_sendFile.read(reinterpret_cast<char*>(m_IdrPos100.data()), m_IdrPos100.size() * sizeof(long long));
-    for (size_t i = 0; i < m_IdrPos100.size(); ++i) {
-        NLOG_INF("m_IdrPos100[%d] = %lld\n", i, m_IdrPos100[i]);
-    }
+    // for (size_t i = 0; i < m_IdrPos100.size(); ++i) {
+    //     NLOG_INF("m_IdrPos100[%d] = %lld\n", i, m_IdrPos100[i]);
+    // }
     //判断是否读到了I帧位置信息，没读到时间进行临时获取
     if(std::all_of(m_IdrPos100.begin(), m_IdrPos100.end(), [](long long num) { return num == 0; })){
         auto it = m_fileMapIter; 
@@ -41,9 +41,9 @@ C_ClientConnect::C_ClientConnect(C_Listener* pListener,int socketFd)
     }
     if(m_IdrPos100.size() == 0)
         NLOG_ERR("m_IdrPos100.size() == 0");
-    for (size_t i = 0; i < m_IdrPos100.size(); ++i) {
-        NLOG_INF("after m_IdrPos100[%d] = %lld\n", i, m_IdrPos100[i]);
-    }
+    // for (size_t i = 0; i < m_IdrPos100.size(); ++i) {
+    //     NLOG_INF("after m_IdrPos100[%d] = %lld\n", i, m_IdrPos100[i]);
+    // }
     m_bRunFlag = true;
     m_Thread = std::thread( [this]() { this->SendFileTask(); });
 
@@ -93,7 +93,7 @@ int C_ClientConnect::HandleCtrlMesssage(){
             if(m_IdrPos100[message] >= 100*sizeof(long long)){
                 m_sendFile.seekg(m_IdrPos100[message], std::ios::beg);
                 //偏移到指定位置
-                NLOG_INF("seek to <%d>  %d %!\n", m_IdrPos100[message], message);
+                NLOG_INF("seek to <%d>  message<%d> \n", m_IdrPos100[message], message);
             }else{
                 NLOG_ERR("m_IdrPos100[%d]<%d> invied!\n", message, m_IdrPos100[message]);
             }
