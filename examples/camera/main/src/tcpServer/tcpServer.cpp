@@ -39,7 +39,7 @@ C_TcpServer::~C_TcpServer()
 }
 
 
-//下放媒体数据,发送给每个连接的客户端 flag = 0-音频 1-视频
+//下放媒体数据,发送给每个连接的客户端 flag = ox0-音频 0x80-视频
 int C_TcpServer::SendMedia(unsigned char* pData, unsigned int nLen, char flag){
     int ret = 0;
     std::lock_guard<std::mutex> lock(m_oMutex);
@@ -69,12 +69,12 @@ int C_TcpServer::SendMedia(unsigned char* pData, unsigned int nLen, char flag){
 
 //下放H264数据给所有连接的客户端
 int C_TcpServer::SendH264(unsigned char* pData, unsigned int nLen){
-    return SendMedia(pData, nLen, 1);
+    return SendMedia(pData, nLen, 1<<7);
 }
 
 //下放opus数据,发送给每个连接的客户端
 int C_TcpServer::SendOpus(unsigned char* pData, unsigned int nLen){
-    return SendMedia(pData, nLen, 0);
+    return SendMedia(pData, nLen, 0<<7);
 }
 
 int C_TcpServer::Accept(){

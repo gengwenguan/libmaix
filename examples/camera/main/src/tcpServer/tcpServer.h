@@ -41,7 +41,7 @@ private:
     //接收客户端连接
     int Accept();
 
-    //下放媒体数据,发送给每个连接的客户端 flag = 0-音频 1-视频
+    //下放媒体数据,发送给每个连接的客户端 flag = 0x0-音频 0x8-视频
     int SendMedia(unsigned char* pData, unsigned int nLen, char flag);
 
 private:
