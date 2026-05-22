@@ -11,12 +11,23 @@ C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight)
     :m_Wight(Wight),
     m_Hight(Hight),
     m_pTcpServer(new C_TcpServer(this)),
+    m_pWsServer(new C_WebSocketServer(this, 56070, true)),    // WebSocket直播端口
+    m_pWsFileServer(new C_WebSocketServer(this, 56080, false)), // WebSocket回放端口
+    m_pHttpServer(new C_HttpServer(8080)),                     // HTTP服务器端口
     m_pFileMng(new C_FileMng(this)),
     m_pH264Enc(new C_H264Enc(this, Wight, Hight, Wight, Hight)),
     m_pOpusEnc(new C_OpusEnc(this)),
     m_pNv12Buff(new unsigned char[Wight*Hight+Wight*Hight/2])
 {
-
+    CLOG_INF("Terminal初始化完成\n");
+    CLOG_INF("裸TCP直播端口: 56050\n");
+    CLOG_INF("WebSocket直播端口: 56070\n");
+    CLOG_INF("裸TCP回放端口: 56060\n");
+    CLOG_INF("WebSocket回放端口: 56080\n");
+    CLOG_INF("HTTP服务器端口: 8080\n");
+    
+    // 启动HTTP服务器
+    m_pHttpServer->Start();
 }
 
 
@@ -64,7 +75,14 @@ int C_Terminal::OnOutputH264(unsigned char* data, unsigned int dataLen)
 	}
 
     //通过tcp将数据发送给客户端
-    return m_pTcpServer->SendH264(data, dataLen);
+    m_pTcpServer->SendH264(data, dataLen);
+    
+    //通过WebSocket将数据发送给浏览器客户端
+    m_pWsServer->SendH264(data, dataLen);
+    
+
+    
+    return 0;
 }
 
 //音频编码回调的opus数据
@@ -74,7 +92,14 @@ int C_Terminal::OnOutputOpus(unsigned char* data, unsigned int dataLen){
     m_pFileMng->InputFileData(data, dataLen, 0);
 
     //通过tcp将opus音频数据发送给正在连接预览画面的客户端
-    return m_pTcpServer->SendOpus(data, dataLen);
+    m_pTcpServer->SendOpus(data, dataLen);
+    
+    //通过WebSocket将音频数据发送给浏览器客户端
+    m_pWsServer->SendOpus(data, dataLen);
+    
+
+    
+    return 0;
 }
 
 /*新客户端连接事件*/
@@ -92,6 +117,51 @@ int C_Terminal::OnNewFileCreate()
     CLOG_INF("OnNewFile Create!\n");
     //文件创建时请求编I帧。，保证文件能够正常打开播放
     m_pH264Enc->ForceIframe();
+    return 0;
+}
+
+/*WebSocket新客户端连接事件*/
+int C_Terminal::OnNewWSClientConnect(int fd)
+{
+    CLOG_INF("OnNewWSClientConnect fd:%d\n", fd);
+    //新WebSocket客户端加入连接时请求编I帧
+    m_pH264Enc->ForceIframe();
+    return 0;
+}
+
+/*WebSocket客户端断开连接事件*/
+int C_Terminal::OnWSClientDisconnect(int fd)
+{
+    CLOG_INF("OnWSClientDisconnect fd:%d\n", fd);
+    return 0;
+}
+
+/*接收到WebSocket客户端消息*/
+int C_Terminal::OnWSClientMessage(int fd, const std::vector<unsigned char>& data)
+{
+    if (data.size() > 0) {
+        unsigned char cmd = data[0];
+        CLOG_INF("OnWSClientMessage fd:%d cmd:%d\n", fd, cmd);
+        
+        // 处理关键帧请求命令
+        if (cmd == 0xFF) {
+            CLOG_INF("Received key frame request from fd:%d\n", fd);
+            m_pH264Enc->ForceIframe();
+            return 0;
+        }
+        
+        // 处理回放控制命令
+        // 0~100: 进度条拖动
+        // 101: 快退
+        // 102: 快进
+        // 104: 上一个文件
+        // 105: 下一个文件
+        // 107: 加速播放
+        // 108: 停止加速
+        
+        // 这里可以将命令转发给文件管理模块
+        // m_pFileMng->HandleWebSocketCommand(fd, cmd);
+    }
     return 0;
 }
 

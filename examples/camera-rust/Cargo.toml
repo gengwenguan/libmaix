@@ -1,0 +1,18 @@
+[package]
+name = "camera-rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+libc = "0.2"
+chrono = "0.4"
+
+[build-dependencies]
+bindgen = "0.69.0"
+
+[target.armv7-unknown-linux-musleabihf.dependencies]
+

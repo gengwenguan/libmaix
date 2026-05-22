@@ -14,11 +14,14 @@
 #include "tcpServer.h"
 #include "fileMng.h"
 #include "opusEnc.h"
+#include "websocketServer.h"
+#include "httpServer.h"
 
 class C_Terminal : public C_H264Enc::C_Listener,
                    public C_TcpServer::C_Listener,
                    public C_FileMng::C_Listener,
-                   public C_OpusEnc::C_Listener
+                   public C_OpusEnc::C_Listener,
+                   public C_WebSocketServer::C_Listener
 {
 public:
     C_Terminal(unsigned int Wight, unsigned int Hight);
@@ -48,6 +51,15 @@ private:
 
     /*新文件创建*/
     int OnNewFileCreate() override;
+
+    /*WebSocket新客户端连接事件*/
+    int OnNewWSClientConnect(int fd) override;
+
+    /*WebSocket客户端断开连接事件*/
+    int OnWSClientDisconnect(int fd) override;
+
+    /*接收到WebSocket客户端消息*/
+    int OnWSClientMessage(int fd, const std::vector<unsigned char>& data) override;
 private:
     unsigned int m_Wight;
     unsigned int m_Hight;
@@ -55,6 +67,9 @@ private:
     std::unique_ptr<unsigned char[]> m_pNv12Buff;
 
     std::unique_ptr<C_TcpServer> m_pTcpServer;
+    std::unique_ptr<C_WebSocketServer> m_pWsServer;      // WebSocket直播服务器
+    std::unique_ptr<C_WebSocketServer> m_pWsFileServer;  // WebSocket回放服务器
+    std::unique_ptr<C_HttpServer>     m_pHttpServer;     // HTTP服务器
     std::unique_ptr<C_FileMng>   m_pFileMng;
     std::unique_ptr<C_H264Enc>   m_pH264Enc;
     std::unique_ptr<C_OpusEnc>   m_pOpusEnc;

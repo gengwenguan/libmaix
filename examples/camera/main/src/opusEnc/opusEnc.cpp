@@ -149,7 +149,7 @@ void C_OpusEnc::CaptureEncoder()
         check_alsa_error(err, "Reading from PCM device");
 
             //此处可控制pcm文件写入文件，用于临时测试数据是否正常
-            if(true){ 
+            if(false){ 
                 //智能指针删除器
                 auto fileDeleter = [](std::ofstream* pobj){ pobj->close(); delete pobj; };
                 //使用静态智能指针，程序退出后资源释放文件正常关闭

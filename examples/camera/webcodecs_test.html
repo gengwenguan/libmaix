@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebCodecs API Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .log { background: #f0f0f0; padding: 10px; margin: 10px 0; border-radius: 5px; font-family: monospace; }
+        .success { color: green; }
+        .error { color: red; }
+    </style>
+</head>
+<body>
+    <h1>WebCodecs API Test</h1>
+    <div id="log" class="log"></div>
+    
+    <script>
+        function log(message, type = 'info') {
+            const logDiv = document.getElementById('log');
+            const timestamp = new Date().toLocaleTimeString();
+            const line = document.createElement('div');
+            line.innerHTML = `[${timestamp}] <span class="${type}">${message}</span>`;
+            logDiv.appendChild(line);
+            console.log(message);
+        }
+        
+        function checkWebCodecsSupport() {
+            log('Checking WebCodecs API support...');
+            log('Browser: ' + navigator.userAgent);
+            
+            // 检测WebCodecs API组件
+            const hasVideoDecoder = typeof window.VideoDecoder === 'function';
+            const hasEncodedVideoChunk = typeof window.EncodedVideoChunk === 'function';
+            const hasAudioDecoder = typeof window.AudioDecoder === 'function';
+            const hasEncodedAudioChunk = typeof window.EncodedAudioChunk === 'function';
+            const hasVideoFrame = typeof window.VideoFrame === 'function';
+            
+            log('typeof VideoDecoder: ' + typeof window.VideoDecoder);
+            log('typeof EncodedVideoChunk: ' + typeof window.EncodedVideoChunk);
+            log('typeof AudioDecoder: ' + typeof window.AudioDecoder);
+            log('typeof EncodedAudioChunk: ' + typeof window.EncodedAudioChunk);
+            log('typeof VideoFrame: ' + typeof window.VideoFrame);
+            
+            // 检查window.WebCodecs命名空间
+            if (window.WebCodecs) {
+                log('window.WebCodecs exists');
+                log('typeof window.WebCodecs: ' + typeof window.WebCodecs);
+                if (typeof window.WebCodecs === 'object') {
+                    log('WebCodecs keys: ' + Object.keys(window.WebCodecs));
+                }
+            } else {
+                log('window.WebCodecs does not exist');
+            }
+            
+            // 最终检测：VideoDecoder和EncodedVideoChunk必须都存在
+            const webCodecsSupported = hasVideoDecoder && hasEncodedVideoChunk;
+            
+            log('WebCodecs API supported: ' + webCodecsSupported, webCodecsSupported ? 'success' : 'error');
+            
+            if (webCodecsSupported) {
+                log('WebCodecs API is supported!', 'success');
+                // 尝试创建VideoDecoder实例
+                try {
+                    const decoder = new VideoDecoder({
+                        output: (frame) => frame.close(),
+                        error: (err) => log('Decoder error: ' + err.message, 'error')
+                    });
+                    log('Successfully created VideoDecoder instance!', 'success');
+                    decoder.close();
+                } catch (error) {
+                    log('Failed to create VideoDecoder: ' + error.message, 'error');
+                }
+            } else {
+                log('ERROR: WebCodecs API is not supported', 'error');
+                log('Your browser: ' + navigator.userAgent);
+                log('Required: Chrome 94+, Edge 94+, or Safari 16.4+');
+                
+                // 浏览器特定的解决方案
+                const ua = navigator.userAgent.toLowerCase();
+                if (ua.includes('edg')) {
+                    log('=== Edge Browser ===');
+                    log('Edge should support WebCodecs API by default.');
+                    log('If not working, try:');
+                    log('1. Update Edge to latest version');
+                    log('2. Try Chrome browser instead');
+                } else if (ua.includes('chrome')) {
+                    log('=== Chrome Browser ===');
+                    log('Chrome 94+ supports WebCodecs by default.');
+                    log('If not working:');
+                    log('1. Check chrome://flags for WebCodecs');
+                    log('2. Update Chrome to latest version');
+                } else {
+                    log('=== Other Browser ===');
+                    log('Please use Chrome, Edge, or Safari 16.4+');
+                }
+            }
+        }
+        
+        // 页面加载后执行检测
+        window.onload = function() {
+            log('Page loaded');
+            checkWebCodecsSupport();
+        };
+    </script>
+</body>
+</html>

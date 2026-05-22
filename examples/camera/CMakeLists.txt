@@ -25,6 +25,7 @@ endif()
 # add_definitions(-DAAAAA=1)
 
 # Call compile
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 include(${SDK_PATH}/tools/cmake/compile.cmake)
 
 

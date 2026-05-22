@@ -8,6 +8,8 @@ list(APPEND ADD_INCLUDE "dep/codec/inc"
                         "src/utilTools"
                         "src/fileMng"
                         "src/opusEnc"
+                        "src/websocketServer"
+                        "src/httpServer"
     )
 list(APPEND ADD_PRIVATE_INCLUDE "")
 ###############################################
@@ -19,6 +21,8 @@ file(GLOB ADD_SRCS  "src/*.cpp"
                     "src/utilTools/*.cpp"
                     "src/fileMng/*.cpp"
                     "src/opusEnc/*.cpp"
+                    "src/websocketServer/*.cpp"
+                    "src/httpServer/*.cpp"
     )
 ############ Add source files #################
 # list(APPEND ADD_SRCS    "src/main.c"
