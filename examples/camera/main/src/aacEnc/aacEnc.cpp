@@ -1,0 +1,328 @@
+/*********************************************************************************
+  *Copyright(C),Your Company
+  *FileName:  aacEnc.cpp
+  *Author:    gengwenguan
+  *Date:      2026-05-23
+  *Description:  AAC-LC 编码器实现，参考 opusEnc.cpp 结构
+                 关键差异：
+                   1) FFmpeg 原生 AAC 编码器需要 FLTP planar float 输入，
+                      所以多了 swr_convert(S16 → FLTP) 一步；
+                   2) AAC 帧长固定 1024 samples，与 ALSA 周期 960 不对齐，
+                      用 AVAudioFifo 缓冲攒够再编码。
+**********************************************************************************/
+#include "aacEnc.h"
+#include "logAdapt.h"
+
+#define PRINT_ERROR(errnum) do { \
+    char errbuf[AV_ERROR_MAX_STRING_SIZE]; \
+    av_strerror(errnum, errbuf, sizeof(errbuf)); \
+    CLOG_ERR("AAC ffmpeg error: %s (%d)\n", errbuf, errnum); \
+} while (0)
+
+static void check_alsa_error(int err, const char *msg) {
+    if (err < 0) {
+        fprintf(stderr, "ALSA error: %s: %s\n", msg, snd_strerror(err));
+        exit(EXIT_FAILURE);
+    }
+}
+
+C_AacEnc::C_AacEnc(C_Listener* pListener)
+    : m_pListener(pListener)
+{
+    int err;
+    snd_pcm_hw_params_t* hw_params = nullptr;
+
+    // 1. 打开 ALSA 采集设备
+    err = snd_pcm_open(&m_capture_handle, "default", SND_PCM_STREAM_CAPTURE, 0);
+    check_alsa_error(err, "Opening PCM device for capture");
+
+    err = snd_pcm_hw_params_malloc(&hw_params);
+    check_alsa_error(err, "Allocating hardware parameters");
+    err = snd_pcm_hw_params_any(m_capture_handle, hw_params);
+    check_alsa_error(err, "Initializing hardware parameters");
+    err = snd_pcm_hw_params_set_access(m_capture_handle, hw_params,
+                                       SND_PCM_ACCESS_RW_INTERLEAVED);
+    check_alsa_error(err, "Setting access type");
+    err = snd_pcm_hw_params_set_format(m_capture_handle, hw_params,
+                                       SND_PCM_FORMAT_S16_LE);
+    check_alsa_error(err, "Setting sample format");
+    unsigned int rate = kSampleRate;
+    err = snd_pcm_hw_params_set_rate_near(m_capture_handle, hw_params, &rate, 0);
+    check_alsa_error(err, "Setting sample rate");
+    err = snd_pcm_hw_params_set_channels(m_capture_handle, hw_params, kChannels);
+    check_alsa_error(err, "Setting channel count");
+    unsigned long period_size = kAlsaPeriod;
+    err = snd_pcm_hw_params_set_period_size_near(m_capture_handle, hw_params,
+                                                 &period_size, 0);
+    check_alsa_error(err, "Setting period size");
+    err = snd_pcm_hw_params(m_capture_handle, hw_params);
+    check_alsa_error(err, "Setting hardware parameters");
+    snd_pcm_hw_params_free(hw_params);
+
+    err = snd_pcm_prepare(m_capture_handle);
+    check_alsa_error(err, "Preparing the PCM device");
+
+    // 2. 找到 AAC 编码器（FFmpeg 原生 aac，开箱即用）
+    AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_AAC);
+    if (!codec) {
+        CLOG_ERR("Could not find AV_CODEC_ID_AAC encoder\n");
+        return;
+    }
+
+    m_codec_ctx = avcodec_alloc_context3(codec);
+    if (!m_codec_ctx) {
+        CLOG_ERR("Could not alloc AAC codec context\n");
+        return;
+    }
+
+    m_codec_ctx->sample_rate    = kSampleRate;
+    m_codec_ctx->channels       = kChannels;
+    m_codec_ctx->channel_layout = AV_CH_LAYOUT_MONO;
+    m_codec_ctx->sample_fmt     = AV_SAMPLE_FMT_FLTP;     // AAC 必须 FLTP
+    m_codec_ctx->bit_rate       = kBitRate;
+    m_codec_ctx->profile        = FF_PROFILE_AAC_LOW;     // AAC-LC
+    m_codec_ctx->time_base      = AVRational{1, (int)kSampleRate};
+
+    if (avcodec_open2(m_codec_ctx, codec, nullptr) < 0) {
+        CLOG_ERR("Could not open AAC codec\n");
+        return;
+    }
+
+    // 3. 重采样器：S16 interleaved → FLTP
+    m_swr = swr_alloc();
+    av_opt_set_int       (m_swr, "in_channel_layout",  AV_CH_LAYOUT_MONO,  0);
+    av_opt_set_int       (m_swr, "out_channel_layout", AV_CH_LAYOUT_MONO,  0);
+    av_opt_set_int       (m_swr, "in_sample_rate",     kSampleRate,        0);
+    av_opt_set_int       (m_swr, "out_sample_rate",    kSampleRate,        0);
+    av_opt_set_sample_fmt(m_swr, "in_sample_fmt",      AV_SAMPLE_FMT_S16,  0);
+    av_opt_set_sample_fmt(m_swr, "out_sample_fmt",     AV_SAMPLE_FMT_FLTP, 0);
+    if (swr_init(m_swr) < 0) {
+        CLOG_ERR("Could not init swr context\n");
+        return;
+    }
+
+    // 4. AAC 帧 1024 samples，需要 FIFO 攒数据
+    m_fifo = av_audio_fifo_alloc(AV_SAMPLE_FMT_FLTP, kChannels, kFifoCapacity);
+    if (!m_fifo) {
+        CLOG_ERR("Could not alloc audio fifo\n");
+        return;
+    }
+
+    // 5. 构造 AudioSpecificConfig（fMP4 esds 用）
+    BuildAudioSpecificConfig();
+
+    // 6. 调试 dump：若设置了 AAC_DUMP_PATH 环境变量，则把每帧带 ADTS 头写到该文件
+    //    用于独立验证 ALSA 采集 + AAC 编码音质（ffplay 可直接播放）
+    const char* dumpPath = getenv("AAC_DUMP_PATH");
+    if (dumpPath && *dumpPath) {
+        m_pDumpFile = fopen(dumpPath, "wb");
+        if (m_pDumpFile) {
+            CLOG_INF("AAC dump enabled (with ADTS): %s\n", dumpPath);
+        } else {
+            CLOG_ERR("AAC dump open failed: %s\n", dumpPath);
+        }
+    }
+
+    m_bRun = true;
+    m_pCaptureEncoderThread = std::unique_ptr<std::thread>(
+        new std::thread([this]() { this->CaptureEncoder(); })
+    );
+    CLOG_INF("AAC encoder started: %uHz %uch %ukbps\n",
+             kSampleRate, kChannels, kBitRate / 1000);
+}
+
+C_AacEnc::~C_AacEnc()
+{
+    m_bRun = false;
+    if (m_pCaptureEncoderThread && m_pCaptureEncoderThread->joinable()) {
+        m_pCaptureEncoderThread->join();
+    }
+
+    if (m_fifo)        { av_audio_fifo_free(m_fifo); m_fifo = nullptr; }
+    if (m_swr)         { swr_free(&m_swr); }
+    if (m_codec_ctx)   { avcodec_close(m_codec_ctx); avcodec_free_context(&m_codec_ctx); }
+    if (m_capture_handle) { snd_pcm_close(m_capture_handle); m_capture_handle = nullptr; }
+    if (m_pDumpFile)   { fclose(m_pDumpFile); m_pDumpFile = nullptr; }
+
+    CLOG_INF("~C_AacEnc end\n");
+}
+
+const unsigned char* C_AacEnc::GetAudioSpecificConfig(unsigned int* outLen) const
+{
+    if (outLen) *outLen = m_ascLen;
+    return m_asc;
+}
+
+// AudioSpecificConfig (ISO/IEC 14496-3)
+//   audioObjectType    : 5 bits  (AAC-LC = 2)
+//   samplingFreqIndex  : 4 bits  (48000 = 3)
+//   channelConfig      : 4 bits  (mono = 1)
+//   总共 13 bits，凑 16 bits 即两字节
+void C_AacEnc::BuildAudioSpecificConfig()
+{
+    static const int kFreqTable[] = {
+        96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050,
+        16000, 12000, 11025, 8000,  7350,  0,     0,     0
+    };
+    int freqIdx = 3; // 48000
+    for (int i = 0; i < 13; ++i) {
+        if (kFreqTable[i] == (int)kSampleRate) { freqIdx = i; break; }
+    }
+    int aot = 2;            // AAC-LC
+    int chCfg = (int)kChannels;
+
+    // 大端：AAAAA BBBB CCCC 000
+    unsigned int v = (aot << 11) | (freqIdx << 7) | (chCfg << 3);
+    m_asc[0] = (v >> 8) & 0xFF;
+    m_asc[1] =  v        & 0xFF;
+    m_ascLen = 2;
+    CLOG_INF("AAC ASC: 0x%02x 0x%02x (aot=%d freqIdx=%d ch=%d)\n",
+             m_asc[0], m_asc[1], aot, freqIdx, chCfg);
+}
+
+void C_AacEnc::CaptureEncoder()
+{
+    std::unique_ptr<short[]> captureBuf(new short[kAlsaPeriod * kChannels]);
+
+    // 用于 swr_convert 输出的临时缓冲（FLTP planar）
+    uint8_t** convertedData = nullptr;
+    if (av_samples_alloc_array_and_samples(&convertedData, nullptr,
+                                           kChannels, kAlsaPeriod,
+                                           AV_SAMPLE_FMT_FLTP, 0) < 0) {
+        CLOG_ERR("Could not alloc converted samples buffer\n");
+        return;
+    }
+
+    while (m_bRun) {
+        int err = snd_pcm_readi(m_capture_handle, captureBuf.get(), kAlsaPeriod);
+        if (err == -EPIPE) {
+            CLOG_ERR("ALSA underrun, recovering\n");
+            snd_pcm_prepare(m_capture_handle);
+            continue;
+        } else if (err < 0) {
+            CLOG_ERR("snd_pcm_readi error: %s\n", snd_strerror(err));
+            continue;
+        }
+
+        // S16 → FLTP
+        const uint8_t* inData[1] = { (const uint8_t*)captureBuf.get() };
+        int got = swr_convert(m_swr, convertedData, kAlsaPeriod,
+                              inData, kAlsaPeriod);
+        if (got <= 0) continue;
+
+        // 入 FIFO
+        if (av_audio_fifo_write(m_fifo, (void**)convertedData, got) < got) {
+            CLOG_ERR("av_audio_fifo_write short\n");
+        }
+
+        // 攒够 1024 就编一帧
+        while (av_audio_fifo_size(m_fifo) >= (int)kAacFrameSize) {
+            EncodeOneFrame();
+        }
+    }
+
+    if (convertedData) {
+        av_freep(&convertedData[0]);
+        av_freep(&convertedData);
+    }
+    CLOG_INF("AAC CaptureEncoder exit\n");
+}
+
+void C_AacEnc::EncodeOneFrame()
+{
+    AVFrame* frame = av_frame_alloc();
+    if (!frame) return;
+
+    frame->nb_samples     = kAacFrameSize;
+    frame->format         = AV_SAMPLE_FMT_FLTP;
+    frame->channel_layout = AV_CH_LAYOUT_MONO;
+    frame->channels       = kChannels;
+    frame->sample_rate    = kSampleRate;
+    if (av_frame_get_buffer(frame, 0) < 0) {
+        CLOG_ERR("AAC frame get_buffer fail\n");
+        av_frame_free(&frame);
+        return;
+    }
+
+    if (av_audio_fifo_read(m_fifo, (void**)frame->data, kAacFrameSize)
+        < (int)kAacFrameSize) {
+        CLOG_ERR("av_audio_fifo_read short\n");
+        av_frame_free(&frame);
+        return;
+    }
+
+    frame->pts = m_nextPts;
+    m_nextPts += kAacFrameSize;
+
+    int ret = avcodec_send_frame(m_codec_ctx, frame);
+    if (ret < 0) {
+        PRINT_ERROR(ret);
+        av_frame_free(&frame);
+        return;
+    }
+
+    AVPacket* pkt = av_packet_alloc();
+    while (true) {
+        ret = avcodec_receive_packet(m_codec_ctx, pkt);
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
+        if (ret < 0) { PRINT_ERROR(ret); break; }
+
+        int64_t ptsUs = av_rescale_q(pkt->pts,
+                                     m_codec_ctx->time_base,
+                                     AVRational{1, 1000000});
+        if (m_pDumpFile) {
+            WriteAdtsAndDump(pkt->data, pkt->size);
+        }
+        if (m_pListener) {
+            m_pListener->OnOutputAac(pkt->data, pkt->size, ptsUs);
+        }
+        av_packet_unref(pkt);
+    }
+    av_packet_free(&pkt);
+    av_frame_free(&frame);
+}
+
+// 给 raw AAC 加 ADTS 头并写入 dump 文件
+// ADTS = 7字节固定头（本实现未使用 CRC，所以是7字节，protection_absent=1）
+//   syncword         12 bits = 0xFFF
+//   ID               1 bit   = 0  (MPEG-4)
+//   layer            2 bits  = 0
+//   protection_abs   1 bit   = 1
+//   profile          2 bits  = aot - 1  (AAC-LC -> 1)
+//   freq_index       4 bits
+//   private          1 bit   = 0
+//   channel_config   3 bits
+//   ori/copy         2 bits  = 0
+//   home/copyright   2 bits  = 0
+//   frame_length     13 bits = 7 + raw_aac_size
+//   buffer_full      11 bits = 0x7FF
+//   num_raw_blk      2 bits  = 0
+void C_AacEnc::WriteAdtsAndDump(const unsigned char* aac, unsigned int aacLen)
+{
+    if (!m_pDumpFile) return;
+
+    static const int kFreqTable[] = {
+        96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050,
+        16000, 12000, 11025, 8000,  7350,  0,     0,     0
+    };
+    int freqIdx = 3;
+    for (int i = 0; i < 13; ++i) {
+        if (kFreqTable[i] == (int)kSampleRate) { freqIdx = i; break; }
+    }
+    const int profile = 1;            // AAC-LC = aot 2 - 1
+    const int chCfg   = (int)kChannels;
+    const unsigned int frameLen = 7 + aacLen;
+
+    unsigned char adts[7];
+    adts[0] = 0xFF;
+    adts[1] = 0xF1;                                            // 0xF1 = MPEG-4 + protection_absent
+    adts[2] = (profile << 6) | (freqIdx << 2) | (chCfg >> 2);
+    adts[3] = ((chCfg & 3) << 6) | ((frameLen >> 11) & 0x03);
+    adts[4] = (frameLen >> 3) & 0xFF;
+    adts[5] = ((frameLen & 0x07) << 5) | 0x1F;
+    adts[6] = 0xFC;
+
+    fwrite(adts, 1, sizeof(adts), m_pDumpFile);
+    fwrite(aac,  1, aacLen,       m_pDumpFile);
+    fflush(m_pDumpFile);
+}

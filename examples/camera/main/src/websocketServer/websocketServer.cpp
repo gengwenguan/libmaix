@@ -6,6 +6,7 @@
   *Description:  WebSocket服务器实现（不依赖OpenSSL）
 **********************************************************************************/
 #include "websocketServer.h"
+#include "tlsContext.h"
 #include "logAdapt.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +17,7 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>     // TCP_NODELAY
 #include <fcntl.h>
 #include <chrono>
 #include <fstream>
@@ -216,12 +218,52 @@ C_WebSocketServer::C_WebSocketServer(C_Listener* pListener, int port, bool isLiv
 
     CLOG_INF("WebSocket服务器启动在端口 %d (%s)\n", m_port, m_isLive ? "直播" : "回放");
 
-    // 启动接收线程
+    // 直播模式下订阅 LiveHub，自动接收 fMP4 init segment + fragment
+    if (m_isLive) {
+        C_LiveHub::Inst().Subscribe(this);
+    }
+
+    // 启动接收线程（必须放在订阅之后，避免遗漏 init segment）
     m_acceptThread = std::thread(&C_WebSocketServer::AcceptThread, this);
+}
+
+void C_WebSocketServer::EnableTls(int tlsPort, C_TlsContext* pTls)
+{
+    m_tlsPort = tlsPort;
+    m_pTls    = pTls;
+    if (!m_pTls) return;
+
+    m_tlsServerFd = socket(AF_INET, SOCK_STREAM, 0);
+    if (m_tlsServerFd < 0) {
+        CLOG_ERR("WSS socket创建失败: %s\n", strerror(errno));
+        return;
+    }
+    int o = 1;
+    setsockopt(m_tlsServerFd, SOL_SOCKET, SO_REUSEADDR, &o, sizeof(o));
+    int fl = fcntl(m_tlsServerFd, F_GETFL, 0);
+    fcntl(m_tlsServerFd, F_SETFL, fl | O_NONBLOCK);
+    struct sockaddr_in addr2;
+    memset(&addr2, 0, sizeof(addr2));
+    addr2.sin_family = AF_INET;
+    addr2.sin_addr.s_addr = INADDR_ANY;
+    addr2.sin_port = htons(m_tlsPort);
+    if (bind(m_tlsServerFd, (struct sockaddr*)&addr2, sizeof(addr2)) < 0 ||
+        listen(m_tlsServerFd, 10) < 0) {
+        CLOG_ERR("WSS bind/listen失败: %s\n", strerror(errno));
+        close(m_tlsServerFd);
+        m_tlsServerFd = -1;
+        return;
+    }
+    CLOG_INF("WSS服务器启动在端口 %d (%s)\n", m_tlsPort, m_isLive ? "直播" : "回放");
 }
 
 C_WebSocketServer::~C_WebSocketServer()
 {
+    // 先取消订阅，避免 LiveHub 在析构期间继续回调
+    if (m_isLive) {
+        C_LiveHub::Inst().Unsubscribe(this);
+    }
+
     m_bRunFlag = false;
 
     if (m_acceptThread.joinable()) {
@@ -240,6 +282,11 @@ C_WebSocketServer::~C_WebSocketServer()
 
     if (m_server_fd >= 0) {
         close(m_server_fd);
+        m_server_fd = -1;
+    }
+    if (m_tlsServerFd >= 0) {
+        close(m_tlsServerFd);
+        m_tlsServerFd = -1;
     }
 
     CLOG_INF("WebSocket服务器停止\n");
@@ -256,6 +303,10 @@ void C_WebSocketServer::AcceptThread()
 
         // 添加所有客户端到fd_set
         int max_fd = m_server_fd;
+        if (m_tlsServerFd >= 0) {
+            FD_SET(m_tlsServerFd, &read_fds);
+            if (m_tlsServerFd > max_fd) max_fd = m_tlsServerFd;
+        }
         {
             std::lock_guard<std::mutex> lock(m_clientsMutex);
             for (int fd : m_clientFds) {
@@ -277,32 +328,96 @@ void C_WebSocketServer::AcceptThread()
             continue;
         }
 
-        // 处理新连接
-        if (FD_ISSET(m_server_fd, &read_fds)) {
+        // 处理新连接：明文 WS / wss 共用 ProcessClient，差别仅在握手前是否有 SSL_accept
+        auto handleAccept = [this](int listenFd, bool isTls) {
             struct sockaddr_in client_addr;
             socklen_t addr_len = sizeof(client_addr);
-            int new_fd = accept(m_server_fd, (struct sockaddr *)&client_addr, &addr_len);
+            int new_fd = accept(listenFd, (struct sockaddr *)&client_addr, &addr_len);
+            if (new_fd < 0) return;
 
-            if (new_fd >= 0) {
-                // 设置非阻塞
-                int flags = fcntl(new_fd, F_GETFL, 0);
-                fcntl(new_fd, F_SETFL, flags | O_NONBLOCK);
+            // 设置非阻塞
+            int flags = fcntl(new_fd, F_GETFL, 0);
+            fcntl(new_fd, F_SETFL, flags | O_NONBLOCK);
 
-                // 添加到客户端集合
-                {
-                    std::lock_guard<std::mutex> lock(m_clientsMutex);
-                    m_clientFds.insert(new_fd);
-                    m_clients[new_fd] = std::make_shared<WSClient>(new_fd);
+            // TCP_NODELAY：关闭 Nagle 算法
+            //   直播 fragment 通常 10~30KB，且我们以 ~1Hz IDR + ~500ms frag_duration
+            //   的节奏一帧一帧推；Nagle 默认在 ACK 未到时合并小包，会让某些 fragment
+            //   多等 40ms（ACK 延迟）。对一个目标低延迟（< 1s）的直播链路而言，
+            //   Nagle 累积的抖动是可观测的；m_isLive 路径必须关掉。
+            //   非直播路径（回放 ws）也开着没坏处——回放本身就是一次性大块发送。
+            {
+                int one = 1;
+                if (setsockopt(new_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) < 0) {
+                    CLOG_ERR("setsockopt(TCP_NODELAY) fd=%d failed: %s\n",
+                             new_fd, strerror(errno));
                 }
-
-                CLOG_INF("WebSocket新客户端连接: fd=%d\n", new_fd);
-
-                // 启动客户端处理线程
-                std::thread clientThread(&C_WebSocketServer::ProcessClient, this, new_fd);
-                clientThread.detach();
             }
+
+            std::shared_ptr<C_SslConn> sslConn;
+            if (isTls) {
+                auto u = m_pTls->AcceptOnFd(new_fd);
+                if (!u) {
+                    close(new_fd);
+                    return;
+                }
+                sslConn = std::shared_ptr<C_SslConn>(u.release());
+            }
+
+            // 添加到客户端集合
+            auto wsClient = std::make_shared<WSClient>(new_fd);
+            wsClient->ssl = sslConn;
+            {
+                std::lock_guard<std::mutex> lock(m_clientsMutex);
+                m_clientFds.insert(new_fd);
+                m_clients[new_fd] = wsClient;
+            }
+
+            CLOG_INF("WebSocket%s新客户端连接: fd=%d\n", isTls ? "(TLS)" : "", new_fd);
+
+            // 启动客户端处理线程
+            std::thread clientThread(&C_WebSocketServer::ProcessClient, this, new_fd);
+            clientThread.detach();
+        };
+
+        if (FD_ISSET(m_server_fd, &read_fds)) {
+            handleAccept(m_server_fd, false);
+        }
+        if (m_tlsServerFd >= 0 && FD_ISSET(m_tlsServerFd, &read_fds)) {
+            handleAccept(m_tlsServerFd, true);
         }
     }
+}
+
+int C_WebSocketServer::IoRead(WSClient* client, void* buf, int len, bool& wantMore)
+{
+    wantMore = false;
+    if (!client) return -1;
+    if (client->ssl) {
+        return client->ssl->Read(buf, len, wantMore);
+    }
+    ssize_t n = recv(client->fd, buf, len, 0);
+    if (n >= 0) return (int)n;
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+        wantMore = true;
+        return -1;
+    }
+    return -1;
+}
+
+int C_WebSocketServer::IoWrite(WSClient* client, const void* buf, int len, bool& wantMore)
+{
+    wantMore = false;
+    if (!client) return -1;
+    if (client->ssl) {
+        return client->ssl->Write(buf, len, wantMore);
+    }
+    ssize_t n = send(client->fd, buf, len, MSG_NOSIGNAL);
+    if (n >= 0) return (int)n;
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+        wantMore = true;
+        return -1;
+    }
+    return -1;
 }
 
 void C_WebSocketServer::ProcessClient(int fd)
@@ -400,10 +515,14 @@ void C_WebSocketServer::ProcessClient(int fd)
     }
 
     while (m_bRunFlag) {
-        ssize_t n = recv(fd, buffer.data(), buffer.size(), 0);
+        auto clientForRead = GetClient(fd);
+        if (!clientForRead) break;
+
+        bool wantMore = false;
+        int n = IoRead(clientForRead.get(), buffer.data(), (int)buffer.size(), wantMore);
 
         if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (wantMore) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
@@ -426,6 +545,20 @@ void C_WebSocketServer::ProcessClient(int fd)
                 recvData.clear();
                 client->handshakeComplete = true;
                 client->state = WS_OPEN;
+
+                // 直播模式：握手成功后立即下发已缓存的 fMP4 init segment（ftyp+moov）
+                // 否则浏览器 MSE 无法初始化解码器，后续 fragment 全部无效
+                if (m_isLive) {
+                    std::vector<uint8_t> initSegCopy;
+                    {
+                        std::lock_guard<std::mutex> lock(m_initSegMutex);
+                        initSegCopy = m_initSegCache;
+                    }
+                    if (!initSegCopy.empty()) {
+                        SendWSFrame(fd, initSegCopy.data(),
+                                    (unsigned int)initSegCopy.size(), WS_BINARY);
+                    }
+                }
 
                 // 通知新客户端连接
                 if (m_pListener) {
@@ -488,6 +621,23 @@ bool C_WebSocketServer::HandleHandshake(int fd, const std::vector<unsigned char>
         return false; // 数据不完整
     }
 
+    // 解析请求行中的 URL path（"GET /ws/talk HTTP/1.1"）
+    std::string urlPath = "/";
+    {
+        size_t lineEnd = request.find("\r\n");
+        if (lineEnd != std::string::npos) {
+            std::string line = request.substr(0, lineEnd);
+            size_t p1 = line.find(' ');
+            size_t p2 = (p1 != std::string::npos) ? line.find(' ', p1 + 1) : std::string::npos;
+            if (p1 != std::string::npos && p2 != std::string::npos && p2 > p1 + 1) {
+                urlPath = line.substr(p1 + 1, p2 - p1 - 1);
+                // 去掉 query
+                size_t q = urlPath.find('?');
+                if (q != std::string::npos) urlPath = urlPath.substr(0, q);
+            }
+        }
+    }
+
     // 解析Sec-WebSocket-Key
     size_t keyPos = request.find("Sec-WebSocket-Key: ");
     if (keyPos == std::string::npos) {
@@ -510,14 +660,37 @@ bool C_WebSocketServer::HandleHandshake(int fd, const std::vector<unsigned char>
         "Sec-WebSocket-Accept: " + acceptKey + "\r\n"
         "\r\n";
 
-    // 发送响应
-    ssize_t sent = send(fd, response.c_str(), response.length(), MSG_NOSIGNAL);
-    if (sent < 0) {
-        CLOG_ERR("WebSocket握手响应发送失败: %s\n", strerror(errno));
+    // 通过 IoWrite 发送响应（同时支持 ws/wss）
+    auto client = GetClient(fd);
+    if (!client) {
+        CLOG_ERR("WebSocket握手响应失败: fd=%d 已无对应客户端\n", fd);
+        return false;
+    }
+    client->urlPath = urlPath;
+
+    const char* p = response.c_str();
+    size_t remain = response.length();
+    while (remain > 0) {
+        bool wantMore = false;
+        int w = IoWrite(client.get(), p, (int)remain, wantMore);
+        if (w > 0) {
+            p      += w;
+            remain -= (size_t)w;
+            continue;
+        }
+        if (wantMore) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+        }
+        CLOG_ERR("WebSocket握手响应发送失败(fd=%d): %s\n", fd, strerror(errno));
         return false;
     }
 
-    CLOG_INF("WebSocket握手成功: fd=%d\n", fd);
+    CLOG_INF("WebSocket握手成功: fd=%d path=%s\n", fd, urlPath.c_str());
+
+    if (m_pListener) {
+        m_pListener->OnWSClientHandshake(fd, urlPath);
+    }
     return true;
 }
 
@@ -617,14 +790,39 @@ int C_WebSocketServer::SendWSFrame(int fd, const unsigned char* data, unsigned i
 {
     auto frame = BuildWSFrame(data, len, opcode);
 
-    ssize_t sent = send(fd, frame.data(), frame.size(), MSG_NOSIGNAL);
-    if (sent < 0) {
-        if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            CLOG_ERR("WebSocket发送失败: %s\n", strerror(errno));
-            return -1;
-        }
-    }
+    auto client = GetClient(fd);
+    if (!client) return -1;
 
+    // 必须循环发送直到全部写完：客户端 socket 是非阻塞模式（O_NONBLOCK），
+    // fMP4 fragment 通常 10~30KB，一次 send 写不完会发生 short write。
+    // wss 模式下还要处理 SSL_ERROR_WANT_READ/WRITE。
+    const unsigned char* p = frame.data();
+    size_t remaining = frame.size();
+    while (remaining > 0) {
+        bool wantMore = false;
+        int sent = IoWrite(client.get(), p, (int)remaining, wantMore);
+        if (sent > 0) {
+            p         += sent;
+            remaining -= (size_t)sent;
+            continue;
+        }
+        if (wantMore) {
+            // socket / SSL 缓冲满，等可写（最多 1s）
+            fd_set wfds;
+            FD_ZERO(&wfds);
+            FD_SET(fd, &wfds);
+            struct timeval tv = {1, 0};
+            int sret = select(fd + 1, nullptr, &wfds, nullptr, &tv);
+            if (sret <= 0) {
+                CLOG_ERR("WebSocket发送超时(fd=%d remain=%zu)\n", fd, remaining);
+                return -1;
+            }
+            continue;
+        }
+        // 其它错误（EPIPE/ECONNRESET/...）
+        CLOG_ERR("WebSocket发送失败(fd=%d): %s\n", fd, strerror(errno));
+        return -1;
+    }
     return 0;
 }
 
@@ -638,60 +836,45 @@ int C_WebSocketServer::SendBinary(int fd, unsigned char* pData, unsigned int nLe
     return SendWSFrame(fd, pData, nLen, WS_BINARY);
 }
 
-int C_WebSocketServer::SendH264(unsigned char* pData, unsigned int nLen)
+void C_WebSocketServer::BroadcastBinary(const uint8_t* data, size_t len)
 {
-    // 构建数据包: [4字节长度] + [1字节标志] + [H264数据]
-    unsigned int totalLen = sizeof(unsigned int) + 1 + nLen;
-    std::vector<unsigned char> packet(totalLen);
-
-    // 写入长度（网络字节序）
-    unsigned int netLen = htonl(nLen + 1);
-    memcpy(packet.data(), &netLen, sizeof(netLen));
-
-    // 写入标志 (0x80 = 视频)
-    packet[sizeof(netLen)] = 0x80;
-
-    // 写入数据
-    memcpy(packet.data() + sizeof(netLen) + 1, pData, nLen);
-
-    // 发送给所有客户端
-    std::lock_guard<std::mutex> lock(m_clientsMutex);
-    for (int fd : m_clientFds) {
-        auto client = m_clients[fd];
-        if (client && client->state == WS_OPEN) {
-            SendWSFrame(fd, packet.data(), packet.size(), WS_BINARY);
+    // 修复死锁：SendWSFrame 内部会调用 GetClient() 再次锁 m_clientsMutex，
+    // 与本函数原先持锁 + 在锁内循环 SendWSFrame 形成 std::mutex 二次加锁，
+    // 直接挂死生产者线程（H264Enc 回调），导致 vipp[0] frame 不被释放、
+    // ISP 累计 select timeout，浏览器观察到的现象是"连上后画面全黑"。
+    // 改为：持锁阶段只快照 fd + WSClient，释放锁后再发送。
+    std::vector<std::pair<int, std::shared_ptr<WSClient>>> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(m_clientsMutex);
+        snapshot.reserve(m_clientFds.size());
+        for (int fd : m_clientFds) {
+            auto it = m_clients.find(fd);
+            if (it == m_clients.end()) continue;
+            auto& cli = it->second;
+            if (cli && cli->state == WS_OPEN) {
+                snapshot.emplace_back(fd, cli);
+            }
         }
     }
-
-    return 0;
+    for (auto& kv : snapshot) {
+        SendWSFrame(kv.first, data, (unsigned int)len, WS_BINARY);
+    }
 }
 
-int C_WebSocketServer::SendOpus(unsigned char* pData, unsigned int nLen)
+void C_WebSocketServer::OnLiveInitSegment(const uint8_t* data, size_t len)
 {
-    // 构建数据包: [4字节长度] + [1字节标志] + [Opus数据]
-    unsigned int totalLen = sizeof(unsigned int) + 1 + nLen;
-    std::vector<unsigned char> packet(totalLen);
-
-    // 写入长度（网络字节序）
-    unsigned int netLen = htonl(nLen + 1);
-    memcpy(packet.data(), &netLen, sizeof(netLen));
-
-    // 写入标志 (0x00 = 音频)
-    packet[sizeof(netLen)] = 0x00;
-
-    // 写入数据
-    memcpy(packet.data() + sizeof(netLen) + 1, pData, nLen);
-
-    // 发送给所有客户端
-    std::lock_guard<std::mutex> lock(m_clientsMutex);
-    for (int fd : m_clientFds) {
-        auto client = m_clients[fd];
-        if (client && client->state == WS_OPEN) {
-            SendWSFrame(fd, packet.data(), packet.size(), WS_BINARY);
-        }
+    // 1) 缓存（新连接握手成功后立即下发，保证任意时刻接入都能解码）
+    {
+        std::lock_guard<std::mutex> lock(m_initSegMutex);
+        m_initSegCache.assign(data, data + len);
     }
+    // 2) 同时广播给已连接客户端（init segment 重置时）
+    BroadcastBinary(data, len);
+}
 
-    return 0;
+void C_WebSocketServer::OnLiveFragment(const uint8_t* data, size_t len)
+{
+    BroadcastBinary(data, len);
 }
 
 void C_WebSocketServer::CloseClient(int fd)
@@ -700,9 +883,16 @@ void C_WebSocketServer::CloseClient(int fd)
 
     auto it = m_clients.find(fd);
     if (it != m_clients.end()) {
-        // 发送关闭帧
+        auto& cli = it->second;
+        // 发送关闭帧（明文/TLS 都要）
         unsigned char closeFrame[] = {0x88, 0x00}; // FIN=1, opcode=CLOSE
-        send(fd, closeFrame, sizeof(closeFrame), MSG_NOSIGNAL);
+        if (cli && cli->ssl) {
+            bool wm = false;
+            cli->ssl->Write(closeFrame, sizeof(closeFrame), wm);
+            cli->ssl->Shutdown();
+        } else {
+            send(fd, closeFrame, sizeof(closeFrame), MSG_NOSIGNAL);
+        }
 
         close(fd);
         m_clientFds.erase(fd);

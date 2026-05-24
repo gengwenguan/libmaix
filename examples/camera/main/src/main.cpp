@@ -5,6 +5,9 @@
 #include <thread>
 #include <signal.h>
 #include <string>
+#include <unistd.h>
+#include <exception>
+#include <cstdlib>
 
 #include "libmaix_image.h"
 #include "libmaix_cam.h"
@@ -14,6 +17,7 @@
 
 #include "terminal.h"
 #include "logAdapt.h"
+#include "appConfig.h"
 
 #include "opencv2/imgproc.hpp"
 
@@ -51,8 +55,65 @@ constexpr int kDispH = 240;
 bool g_apprun = true;
 int main(int argc, char **argv)
 {
+    // ---- 第一时间忽略 SIGPIPE：极重要 ----
+    // 当客户端在 SSL_write 半路关闭连接时，OpenSSL 内部的 BIO 不带 MSG_NOSIGNAL，
+    // 内核会给整个进程发 SIGPIPE，默认动作是 Term —— 没有任何 dmesg / 异常 / 日志，
+    // 表现就是"进程突然没了"。这是几次"快速点击回放→进程消失"的真正凶手。
+    // 忽略后，SSL_write 会改为返回 -1 / errno=EPIPE，由 IoWrite 路径正常处理。
+    signal(SIGPIPE, SIG_IGN);
+
+    // ---- 致命信号留痕：下次再"无声死亡"时能立刻看出是哪个信号 ----
+    // 注意：handler 只用 async-signal-safe 的接口（write、_exit），
+    //   不能用 printf / CLOG_INF / std::exception。
+    auto fatalSig = [](int signo) {
+        const char* name = "UNKNOWN";
+        switch (signo) {
+            case SIGSEGV: name = "SIGSEGV"; break;
+            case SIGBUS:  name = "SIGBUS";  break;
+            case SIGABRT: name = "SIGABRT"; break;
+            case SIGFPE:  name = "SIGFPE";  break;
+            case SIGILL:  name = "SIGILL";  break;
+        }
+        char buf[128];
+        int n = snprintf(buf, sizeof(buf), "\n[FATAL_SIG] caught %s, aborting\n", name);
+        if (n > 0) {
+            ssize_t _ = write(STDERR_FILENO, buf, (size_t)n);
+            (void)_;
+        }
+        // 恢复默认 handler 后再次 raise，让内核生成 core（如开了 ulimit -c）
+        signal(signo, SIG_DFL);
+        raise(signo);
+    };
+    signal(SIGSEGV, fatalSig);
+    signal(SIGBUS,  fatalSig);
+    signal(SIGABRT, fatalSig);
+    signal(SIGFPE,  fatalSig);
+    signal(SIGILL,  fatalSig);
+
+    // 兜底：任何未捕获的异常（含 std::bad_alloc）都先记一笔再退出，
+    // 否则进程会被 std::terminate 静默 abort，事后从日志完全看不到原因。
+    // 这是之前两次"快速点击回放→进程消失"调查时遇到的最大障碍。
+    std::set_terminate([]() {
+        const char* what = "unknown";
+        try {
+            if (auto p = std::current_exception()) {
+                std::rethrow_exception(p);
+            }
+        } catch (const std::bad_alloc& e) {
+            what = "std::bad_alloc (OOM)";
+        } catch (const std::exception& e) {
+            what = e.what();
+        } catch (...) {
+            what = "non-std exception";
+        }
+        CLOG_ERR("FATAL std::terminate: %s\n", what);
+        std::fflush(stderr);
+        std::abort();
+    });
+
     auto app_handlesig = [](int signo){
-        if (SIGINT == signo || SIGTSTP == signo || SIGTERM == signo || SIGQUIT == signo || SIGPIPE == signo || SIGKILL == signo)
+        // 注意：SIGPIPE 已在上面 SIG_IGN，不会进到这里
+        if (SIGINT == signo || SIGTSTP == signo || SIGTERM == signo || SIGQUIT == signo || SIGKILL == signo)
         {
             g_apprun = false;
         }
@@ -62,6 +123,19 @@ int main(int argc, char **argv)
     std::this_thread::sleep_for(std::chrono::milliseconds(8000));  //启动时先等待一会让设备获取到ip地址和时间
     signal(SIGINT, app_handlesig);
     signal(SIGTERM, app_handlesig);
+
+    // ---- 加载运行时配置（必须先于 Terminal 构造，因为录像分片时长来自 AppConfig） ----
+    {
+        char exePath[1024] = {0};
+        ssize_t n = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
+        std::string exeDir = ".";
+        if (n > 0) {
+            std::string ep(exePath);
+            size_t slash = ep.find_last_of('/');
+            if (slash != std::string::npos) exeDir = ep.substr(0, slash);
+        }
+        C_AppConfig::GetInst().Init(exeDir + "/config.json");
+    }
 
     libmaix_image_module_init();
     libmaix_camera_module_init();
@@ -101,15 +175,29 @@ int main(int argc, char **argv)
 
 #else
     //该例程能达到30帧效果
-    struct libmaix_cam*  m_camera = libmaix_cam_create(0, kCamInW, kCamInH, 1, 0);
-    struct libmaix_cam*  m_camera1 = libmaix_cam_create(1, kCamInW, kCamInH, 0, 0); //创建摄像头通道1，不创建会有莫名其表的bug
+    // V831 ISP 对 cam0/cam1 创建顺序非常敏感：必须先 cam0、再 cam1，且中间不能穿插
+    // 其他模块构造（vo / Terminal / TLS / HTTP API …），否则 cam0 输出会变成绿屏。
+    // 因此这里把两路 cam create + start_capture 紧挨在一起，再去构造 vo / Terminal。
+    // cam1（AI 专用 224×224 RGB888，不翻转）随后通过构造参数注入 PersonDetector，
+    // PersonDetector 只"使用"该 cam，本作用域负责 destroy。
+    struct libmaix_cam*  m_camera  = libmaix_cam_create(0, kCamInW, kCamInH, 1, 0);
     m_camera->start_capture(m_camera);
+    struct libmaix_cam*  m_camera1 = libmaix_cam_create(1, 224, 224, 0, 0);
+    if (m_camera1) {
+        if (m_camera1->start_capture(m_camera1) != LIBMAIX_ERR_NONE) {
+            CLOG_INF("cam1 start_capture failed, AI 推理将被禁用\n");
+            libmaix_cam_destroy(&m_camera1);
+            m_camera1 = nullptr;
+        }
+    } else {
+        CLOG_INF("cam1 create failed, AI 推理将被禁用\n");
+    }
 
     //输入要设置为摄像头采集的分辨率，输出在M2dock开发板上分辨率为240*240，要设置输出为240*240才能正常显示
     struct libmaix_vo * m_vo = libmaix_vo_create(kCamInW, kCamInH, 0, 0, kDispW, kDispH);
 
-    //创建终端用于视频编码以及网络传输给客户端
-    C_Terminal* pterminal = new C_Terminal(kCamInW, kCamInH);
+    //创建终端用于视频编码以及网络传输给客户端；cam1 注入给内部的 PersonDetector
+    C_Terminal* pterminal = new C_Terminal(kCamInW, kCamInH, m_camera1);
     while(g_apprun)
     {
         CALC_FPS("g_apprun");
@@ -132,12 +220,46 @@ int main(int argc, char **argv)
             CLOG_INF("reterr != LIBMAIX_ERR_NONE\n");
         }
 
-        //将该设备的ip地址渲染到图片最上方
+        //根据 AppConfig 决定是否叠加 IP/时间（web 设置页可实时切换）
         cv::Mat gray(kCamInH, kCamInW, CV_8UC1, (unsigned char *)vir[0]);
-        cv::putText(gray, C_Terminal::get_ipv4_address().c_str(), cv::Point(5, 30), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(255), 2);
-        //将日期时间渲染到图片最下方
-        std::string strData = C_LogAdapt::GetCurrentDateTimeInChina(true);
-        cv::putText(gray, strData.c_str(), cv::Point(5, kCamInH-5), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(255), 2);
+        const auto osdCfg = C_AppConfig::GetInst().GetSnapshot();
+        if (osdCfg.osd_show_ip) {
+            cv::putText(gray, C_Terminal::get_ipv4_address().c_str(), cv::Point(5, 30), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(255), 2);
+        }
+        if (osdCfg.osd_show_time) {
+            std::string strData = C_LogAdapt::GetCurrentDateTimeInChina(true);
+            cv::putText(gray, strData.c_str(), cv::Point(5, kCamInH-5), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(255), 2);
+        }
+
+        // 在 cam0 的画面上叠加 cam1 推理出的人形检测框。
+        //
+        // 坐标转换原理：
+        //   - PersonDetector 返回的 box 已是归一化 (xc, yc, w, h)，相对于 cam1 的 224×224
+        //     输入空间。但 yolo2 输出"归一化坐标"本质是相对于 sensor 的视场，与具体分辨率
+        //     无关 —— 只要 cam0 / cam1 共用一个 sensor 视场（V831 双 cam ISP 通道是这样的），
+        //     就可以直接 *kCamInW / *kCamInH 得到 cam0 像素坐标，无需任何畸变/裁剪修正。
+        //   - 当前我们只在 NV21 的 Y 平面上画白色矩形/文字，不动 UV → 颜色保持原样，
+        //     代价只有几次 CPU 循环（box 数量极少），不会拖累 FPS。
+        if (osdCfg.ai_enabled && osdCfg.osd_show_ai_box) {
+            // 不要让旧框停留太久：仅取 1s 内的新结果
+            auto boxes = pterminal->GetLatestAiBoxes(1000);
+            for (const auto& b : boxes) {
+                int x1 = (int)((b.xc - b.w * 0.5f) * kCamInW);
+                int y1 = (int)((b.yc - b.h * 0.5f) * kCamInH);
+                int x2 = (int)((b.xc + b.w * 0.5f) * kCamInW);
+                int y2 = (int)((b.yc + b.h * 0.5f) * kCamInH);
+                if (x1 < 0) x1 = 0; if (y1 < 0) y1 = 0;
+                if (x2 > kCamInW - 1) x2 = kCamInW - 1;
+                if (y2 > kCamInH - 1) y2 = kCamInH - 1;
+                if (x2 <= x1 || y2 <= y1) continue;
+                cv::rectangle(gray, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(255), 2);
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "person %.0f%%", b.prob * 100.0f);
+                int ty = (y1 - 6 < 18) ? (y1 + 22) : (y1 - 6);   // 太靠上时把标签放框内
+                cv::putText(gray, buf, cv::Point(x1 + 2, ty),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255), 2);
+            }
+        }
 
         //YUV图片输出到屏幕上显示
         m_vo->set_frame(m_vo, frame, 0);
@@ -146,9 +268,11 @@ int main(int argc, char **argv)
     }
 
     libmaix_vo_destroy(&m_vo);
-    libmaix_cam_destroy(&m_camera);
-    libmaix_cam_destroy(&m_camera1);
+    // 必须先 delete terminal —— 它的析构会 Stop PersonDetector 线程，确保后续
+    // libmaix_cam_destroy(cam1) 时不再有线程在 capture_image。
     delete pterminal;
+    libmaix_cam_destroy(&m_camera);
+    if (m_camera1) libmaix_cam_destroy(&m_camera1);
 
 #endif
 

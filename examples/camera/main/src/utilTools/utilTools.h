@@ -231,3 +231,16 @@ private:
 	std::vector<int> m_Pos;              //每一项的起始位置
 	std::vector<std::string> m_formats;  //每一项的输出格式
 };
+
+#include <chrono>
+//全局单调时基：用于音视频 PTS 对齐
+//首次调用会把 t0 锚定在程序启动时刻，之后所有 Now() 都返回相对 t0 的微秒
+//AAC 与 H264 编码器都用这个时基，保证同一参考起点
+class C_TimeBase {
+public:
+    static int64_t NowUs() {
+        using namespace std::chrono;
+        static const auto t0 = steady_clock::now();
+        return duration_cast<microseconds>(steady_clock::now() - t0).count();
+    }
+};

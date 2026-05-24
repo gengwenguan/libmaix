@@ -3,9 +3,19 @@
   *FileName:  httpServer.cpp
   *Author:    gengwenguan
   *Date:      2024-12-01
-  *Description:  HTTP server implementation (serving web_player.html)
+  *Description:  极简 HTTP 静态文件服务（默认根目录：<exe_dir>/web/）
+  *
+  *  设计要点：
+  *    1. 二进制启动时通过 /proc/self/exe 定位自身所在目录，
+  *       约定 web 资源放在 <exe_dir>/web/，避免把 html 嵌进 .cpp 字符串里。
+  *    2. GET / 与 GET /index.html → web/index.html
+  *    3. 其它 GET 请求按文件名直接读盘，按扩展名推断 Content-Type；
+  *       严格拒绝包含 ".." 或绝对路径的请求，避免目录穿越。
+  *    4. 文件不存在时返回 404 文本，不再 fallback 到内嵌 html，
+  *       避免出现"两份漂移"的维护陷阱。
 **********************************************************************************/
 #include "httpServer.h"
+#include "tlsContext.h"
 #include "logAdapt.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,972 +26,98 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <sys/stat.h>
 #include <fcntl.h>
 #include <chrono>
+#include <fstream>
+#include <sstream>
 
-// Embedded web_player.html content
-static const char WEB_PLAYER_HTML[] =
-"<!DOCTYPE html>\n"
-"<html lang=\"zh-CN\">\n"
-"<head>\n"
-"    <meta charset=\"UTF-8\">\n"
-"    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
-"    <title>Camera WebSocket Player v3</title>\n"
-"    <style>\n"
-"        * {\n"
-"            margin: 0;\n"
-"            padding: 0;\n"
-"            box-sizing: border-box;\n"
-"        }\n"
-"\n"
-"        body {\n"
-"            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;\n"
-"            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);\n"
-"            min-height: 100vh;\n"
-"            display: flex;\n"
-"            flex-direction: column;\n"
-"            align-items: center;\n"
-"            padding: 20px;\n"
-"        }\n"
-"\n"
-"        h1 {\n"
-"            color: white;\n"
-"            margin-bottom: 20px;\n"
-"            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);\n"
-"        }\n"
-"\n"
-"        .container {\n"
-"            background: rgba(255, 255, 255, 0.1);\n"
-"            backdrop-filter: blur(10px);\n"
-"            border-radius: 20px;\n"
-"            padding: 30px;\n"
-"            box-shadow: 0 8px 32px rgba(0,0,0,0.3);\n"
-"            max-width: 900px;\n"
-"            width: 100%;\n"
-"        }\n"
-"\n"
-"        .video-container {\n"
-"            position: relative;\n"
-"            width: 100%;\n"
-"            max-width: 640px;\n"
-"            margin: 0 auto 20px;\n"
-"            background: #000;\n"
-"            border-radius: 10px;\n"
-"            overflow: hidden;\n"
-"        }\n"
-"\n"
-"        #videoCanvas {\n"
-"            width: 100%;\n"
-"            height: auto;\n"
-"            display: block;\n"
-"            background-color: #000;\n"
-"            border: 2px solid #0ff;\n"
-"        }\n"
-"\n"
-"        .controls {\n"
-"            display: flex;\n"
-"            gap: 10px;\n"
-"            justify-content: center;\n"
-"            flex-wrap: wrap;\n"
-"            margin-bottom: 20px;\n"
-"        }\n"
-"\n"
-"        button {\n"
-"            padding: 12px 24px;\n"
-"            border: none;\n"
-"            border-radius: 25px;\n"
-"            cursor: pointer;\n"
-"            font-size: 14px;\n"
-"            font-weight: 600;\n"
-"            transition: all 0.3s ease;\n"
-"            text-transform: uppercase;\n"
-"            letter-spacing: 0.5px;\n"
-"        }\n"
-"\n"
-"        .btn-primary {\n"
-"            background: linear-gradient(45deg, #00c6ff, #0072ff);\n"
-"            color: white;\n"
-"        }\n"
-"\n"
-"        .btn-primary:hover {\n"
-"            transform: translateY(-2px);\n"
-"            box-shadow: 0 5px 15px rgba(0,114,255,0.4);\n"
-"        }\n"
-"\n"
-"        .btn-danger {\n"
-"            background: linear-gradient(45deg, #ff416c, #ff4b2b);\n"
-"            color: white;\n"
-"        }\n"
-"\n"
-"        .btn-danger:hover {\n"
-"            transform: translateY(-2px);\n"
-"            box-shadow: 0 5px 15px rgba(255,65,108,0.4);\n"
-"        }\n"
-"\n"
-"        .btn-secondary {\n"
-"            background: rgba(255,255,255,0.2);\n"
-"            color: white;\n"
-"            border: 1px solid rgba(255,255,255,0.3);\n"
-"        }\n"
-"\n"
-"        .btn-secondary:hover {\n"
-"            background: rgba(255,255,255,0.3);\n"
-"        }\n"
-"\n"
-"        .status {\n"
-"            text-align: center;\n"
-"            color: white;\n"
-"            margin-bottom: 15px;\n"
-"            padding: 10px;\n"
-"            background: rgba(0,0,0,0.2);\n"
-"            border-radius: 10px;\n"
-"        }\n"
-"\n"
-"        .status.connected {\n"
-"            background: rgba(0,255,0,0.2);\n"
-"        }\n"
-"\n"
-"        .status.disconnected {\n"
-"            background: rgba(255,0,0,0.2);\n"
-"        }\n"
-"\n"
-"        .info-panel {\n"
-"            background: rgba(0,0,0,0.2);\n"
-"            border-radius: 10px;\n"
-"            padding: 15px;\n"
-"            color: white;\n"
-"            font-family: 'Courier New', monospace;\n"
-"            font-size: 12px;\n"
-"            max-height: 200px;\n"
-"            overflow-y: auto;\n"
-"        }\n"
-"\n"
-"        .info-panel h3 {\n"
-"            margin-bottom: 10px;\n"
-"            color: #00c6ff;\n"
-"        }\n"
-"\n"
-"        .log-entry {\n"
-"            margin: 5px 0;\n"
-"            padding: 5px;\n"
-"            background: rgba(255,255,255,0.05);\n"
-"            border-radius: 5px;\n"
-"        }\n"
-"\n"
-"        .server-config {\n"
-"            margin-bottom: 20px;\n"
-"            text-align: center;\n"
-"        }\n"
-"\n"
-"        .server-config input {\n"
-"            padding: 10px 15px;\n"
-"            border: none;\n"
-"            border-radius: 25px;\n"
-"            background: rgba(255,255,255,0.2);\n"
-"            color: white;\n"
-"            width: 250px;\n"
-"            margin-right: 10px;\n"
-"        }\n"
-"\n"
-"        .server-config input::placeholder {\n"
-"            color: rgba(255,255,255,0.6);\n"
-"        }\n"
-"\n"
-"        .stats {\n"
-"            display: grid;\n"
-"            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));\n"
-"            gap: 15px;\n"
-"            margin-bottom: 20px;\n"
-"        }\n"
-"\n"
-"        .stat-card {\n"
-"            background: rgba(255,255,255,0.1);\n"
-"            padding: 15px;\n"
-"            border-radius: 10px;\n"
-"            text-align: center;\n"
-"            color: white;\n"
-"        }\n"
-"\n"
-"        .stat-card h4 {\n"
-"            font-size: 12px;\n"
-"            opacity: 0.8;\n"
-"            margin-bottom: 5px;\n"
-"        }\n"
-"\n"
-"        .stat-card .value {\n"
-"            font-size: 24px;\n"
-"            font-weight: bold;\n"
-"            color: #00c6ff;\n"
-"        }\n"
-"    </style>\n"
-"</head>\n"
-"<body>\n"
-"    <h1>Camera WebSocket Player v3</h1>\n"
-"\n"
-"    <div class=\"container\">\n"
-"        <div class=\"server-config\">\n"
-"            <input type=\"text\" id=\"serverIp\" placeholder=\"Enter device IP address\" value=\"192.168.1.11\">\n"
-"        </div>\n"
-"\n"
-"        <div class=\"video-container\">\n"
-"            <canvas id=\"videoCanvas\" width=\"640\" height=\"480\"></canvas>\n"
-"        </div>\n"
-"\n"
-"        <div class=\"status disconnected\" id=\"status\">\n"
-"            Not connected - Click \"Start Live\" button\n"
-"        </div>\n"
-"\n"
-"        <div class=\"stats\">\n"
-"            <div class=\"stat-card\">\n"
-"                <h4>Video FPS</h4>\n"
-"                <div class=\"value\" id=\"fps\">0</div>\n"
-"            </div>\n"
-"            <div class=\"stat-card\">\n"
-"                <h4>Audio FPS</h4>\n"
-"                <div class=\"value\" id=\"audioFps\">0</div>\n"
-"            </div>\n"
-"            <div class=\"stat-card\">\n"
-"                <h4>Bitrate</h4>\n"
-"                <div class=\"value\" id=\"bitrate\">0</div>\n"
-"            </div>\n"
-"            <div class=\"stat-card\">\n"
-"                <h4>Status</h4>\n"
-"                <div class=\"value\" id=\"connectionStatus\">Offline</div>\n"
-"            </div>\n"
-"        </div>\n"
-"\n"
-"        <div class=\"controls\">\n"
-"            <button class=\"btn-primary\" onclick=\"startLive()\">Start Live</button>\n"
-"            <button class=\"btn-danger\" onclick=\"stopLive()\">Stop Live</button>\n"
-"            <button class=\"btn-secondary\" onclick=\"startPlayback()\">Start Playback</button>\n"
-"            <button class=\"btn-secondary\" onclick=\"stopPlayback()\">Stop Playback</button>\n"
-"        </div>\n"
-"\n"
-"        <div class=\"controls\">\n"
-"            <button class=\"btn-secondary\" onclick=\"sendCommand(101)\">Rewind</button>\n"
-"            <button class=\"btn-secondary\" onclick=\"sendCommand(102)\">Forward</button>\n"
-"            <button class=\"btn-secondary\" onclick=\"sendCommand(104)\">Prev File</button>\n"
-"            <button class=\"btn-secondary\" onclick=\"sendCommand(105)\">Next File</button>\n"
-"            <button class=\"btn-secondary\" onclick=\"sendCommand(107)\">Speed Up</button>\n"
-"            <button class=\"btn-secondary\" onclick=\"sendCommand(108)\">Normal Speed</button>\n"
-"        </div>\n"
-"\n"
-"        <div class=\"info-panel\">\n"
-"            <h3>System Log</h3>\n"
-"            <div id=\"logContainer\"></div>\n"
-"        </div>\n"
-"    </div>\n"
-"\n"
-"    <script>\n"
-"        let liveWs = null;\n"
-"        let playbackWs = null;\n"
-"        let videoDecoder = null;\n"
-"        let audioDecoder = null;\n"
-"        const canvas = document.getElementById('videoCanvas');\n"
-"        const ctx = canvas.getContext('2d');\n"
-"        let audioContext = null;\n"
-"        let audioQueue = [];\n"
-"        let nextAudioTime = 0;\n"
-"        let videoFrameCount = 0;\n"
-"        let audioFrameCount = 0;\n"
-"        let lastStatsTime = Date.now();\n"
-"        let receivedKeyFrame = false;\n"
-"        let totalBytes = 0;\n"
-"        let keyFrameTimeout = null;\n"
-"        let decoderConfigured = false;\n"
-"        let spsData = null;\n"
-"        let ppsData = null;\n"
-"        let pendingFrames = [];\n"
-"\n"
-"        function log(message) {\n"
-"            const container = document.getElementById('logContainer');\n"
-"            const entry = document.createElement('div');\n"
-"            entry.className = 'log-entry';\n"
-"            entry.textContent = '[' + new Date().toLocaleTimeString() + '] ' + message;\n"
-"            container.insertBefore(entry, container.firstChild);\n"
-"            while (container.children.length > 50) {\n"
-"                container.removeChild(container.lastChild);\n"
-"            }\n"
-"        }\n"
-"\n"
-"        function updateStatus(message, connected) {\n"
-"            const status = document.getElementById('status');\n"
-"            status.textContent = message;\n"
-"            status.className = 'status ' + (connected ? 'connected' : 'disconnected');\n"
-"            document.getElementById('connectionStatus').textContent = connected ? 'Online' : 'Offline';\n"
-"        }\n"
-"\n"
-"        function checkWebCodecsSupport() {\n"
-"            log('Checking WebCodecs API support...');\n"
-"            log('Browser: ' + navigator.userAgent);\n"
-"            \n"
-"            // 检查安全上下文\n"
-"            const isSecureContext = window.isSecureContext;\n"
-"            const protocol = location.protocol;\n"
-"            const hostname = location.hostname;\n"
-"            \n"
-"            log('Protocol: ' + protocol);\n"
-"            log('Hostname: ' + hostname);\n"
-"            log('isSecureContext: ' + isSecureContext);\n"
-"            \n"
-"            // 使用typeof检测WebCodecs API构造函数\n"
-"            const hasVideoDecoder = typeof window.VideoDecoder === 'function';\n"
-"            const hasEncodedVideoChunk = typeof window.EncodedVideoChunk === 'function';\n"
-"            const hasAudioDecoder = typeof window.AudioDecoder === 'function';\n"
-"            const hasEncodedAudioChunk = typeof window.EncodedAudioChunk === 'function';\n"
-"            const hasVideoFrame = typeof window.VideoFrame === 'function';\n"
-"            \n"
-"            log('typeof VideoDecoder: ' + typeof window.VideoDecoder);\n"
-"            log('typeof EncodedVideoChunk: ' + typeof window.EncodedVideoChunk);\n"
-"            log('typeof AudioDecoder: ' + typeof window.AudioDecoder);\n"
-"            log('typeof EncodedAudioChunk: ' + typeof window.EncodedAudioChunk);\n"
-"            log('typeof VideoFrame: ' + typeof window.VideoFrame);\n"
-"            \n"
-"            // 最终检测：VideoDecoder和EncodedVideoChunk必须都存在\n"
-"            const webCodecsSupported = hasVideoDecoder && hasEncodedVideoChunk;\n"
-"            \n"
-"            log('WebCodecs API supported: ' + webCodecsSupported);\n"
-"            \n"
-"            if (webCodecsSupported) {\n"
-"                log('WebCodecs API is supported!');\n"
-"                return true;\n"
-"            } else {\n"
-"                log('ERROR: WebCodecs API is not supported');\n"
-"                \n"
-"                // 检查是否是安全上下文问题\n"
-"                if (!isSecureContext && protocol === 'http:') {\n"
-"                    log('=== SECURITY CONTEXT ERROR ===');\n"
-"                    log('WebCodecs API requires a secure context (HTTPS or localhost)');\n"
-"                    log('Current URL: ' + location.href);\n"
-"                    log('');\n"
-"                    log('SOLUTIONS:');\n"
-"                    log('1. Use SSH port forwarding:');\n"
-"                    log('   ssh -L 8080:localhost:8080 root@' + hostname);\n"
-"                    log('   Then access: http://localhost:8080/');\n"
-"                    log('');\n"
-"                    log('2. Use Chrome/Edge with flag:');\n"
-"                    log('   Add to shortcut target:');\n"
-"                    log('   --unsafely-treat-insecure-origin-as-secure=http://' + hostname + ':8080');\n"
-"                    log('');\n"
-"                    log('3. Setup HTTPS (advanced)');\n"
-"                } else {\n"
-"                    log('Your browser: ' + navigator.userAgent);\n"
-"                    log('Required: Chrome 94+, Edge 94+, or Safari 16.4+');\n"
-"                }\n"
-"                \n"
-"                return false;\n"
-"            }\n"
-"        }\n"
-"\n"
-"        async function initVideoDecoder() {\n"
-"            if (!checkWebCodecsSupport()) {\n"
-"                alert('Your browser does not support WebCodecs API. Please use Chrome 94+, Edge 94+, or Safari 16.4+');\n"
-"                return false;\n"
-"            }\n"
-"\n"
-"            try {\n"
-"                videoDecoder = new VideoDecoder({\n"
-"                    output: function(videoFrame) {\n"
-"                        try {\n"
-"                            ctx.drawImage(videoFrame, 0, 0, canvas.width, canvas.height);\n"
-"                            videoFrameCount++;\n"
-"                        } catch (e) {\n"
-"                            log('Render error: ' + e.message);\n"
-"                        } finally {\n"
-"                            videoFrame.close();\n"
-"                        }\n"
-"                    },\n"
-"                    error: function(error) {\n"
-"                        log('Video decode error: ' + error.message);\n"
-"                        // 重置解码器状态，等待下一个关键帧重新初始化\n"
-"                        videoDecoder = null;\n"
-"                        receivedKeyFrame = false;\n"
-"                        spsData = null;\n"
-"                        ppsData = null;\n"
-"                    }\n"
-"                });\n"
-"\n"
-"                await videoDecoder.configure({\n"
-"                    codec: 'avc1.42E01E',\n"
-"                    codedWidth: 640,\n"
-"                    codedHeight: 480\n"
-"                });\n"
-"\n"
-"                log('Video decoder initialized successfully');\n"
-"                return true;\n"
-"            } catch (error) {\n"
-"                log('Failed to initialize video decoder: ' + error.message);\n"
-"                alert('Failed to initialize video decoder: ' + error.message);\n"
-"                return false;\n"
-"            }\n"
-"        }\n"
-"\n"
-"        async function initAudioDecoder() {\n"
-"            if (!('AudioDecoder' in window)) {\n"
-"                log('Warning: Browser does not support audio decoding');\n"
-"                return false;\n"
-"            }\n"
-"\n"
-"            try {\n"
-"                audioContext = new (window.AudioContext || window.webkitAudioContext)({\n"
-"                    sampleRate: 48000\n"
-"                });\n"
-"\n"
-"                audioDecoder = new AudioDecoder({\n"
-"                    output: function(audioData) {\n"
-"                        playAudio(audioData);\n"
-"                        audioData.close();\n"
-"                        audioFrameCount++\n"
-"                    },\n"
-"                    error: function(error) {\n"
-"                        log('Audio decode error: ' + error.message);\n"
-"                    }\n"
-"                });\n"
-"\n"
-"                await audioDecoder.configure({\n"
-"                    codec: 'opus',\n"
-"                    sampleRate: 48000,\n"
-"                    numberOfChannels: 2\n"
-"                });\n"
-"\n"
-"                return true;\n"
-"            } catch (error) {\n"
-"                log('Failed to initialize audio decoder: ' + error.message);\n"
-"                return false;\n"
-"            }\n"
-"        }\n"
-"\n"
-"        function playAudio(audioData) {\n"
-"            try {\n"
-"                const buffer = audioContext.createBuffer(\n"
-"                    audioData.numberOfChannels,\n"
-"                    audioData.numberOfFrames,\n"
-"                    audioData.sampleRate\n"
-"                );\n"
-"\n"
-"                for (let i = 0; i < audioData.numberOfChannels; i++) {\n"
-"                    const channelData = buffer.getChannelData(i);\n"
-"                    const options = { planeIndex: i, format: 'f32-planar' };\n"
-"                    audioData.copyTo(channelData, options);\n"
-"                }\n"
-"\n"
-"                const source = audioContext.createBufferSource();\n"
-"                source.buffer = buffer;\n"
-"                source.connect(audioContext.destination);\n"
-"\n"
-"                const currentTime = audioContext.currentTime;\n"
-"                if (nextAudioTime < currentTime) {\n"
-"                    nextAudioTime = currentTime;\n"
-"                }\n"
-"\n"
-"                source.start(nextAudioTime);\n"
-"                nextAudioTime += buffer.duration;\n"
-"            } catch (error) {\n"
-"                log('Audio playback error: ' + error.message);\n"
-"            }\n"
-"        }\n"
-"\n"
-"        function parsePacket(data) {\n"
-"            if (data.length < 5) {\n"
-"                log('Invalid packet: data length < 5');\n"
-"                return null;\n"
-"            }\n"
-"            const view = new DataView(data.buffer);\n"
-"            const length = view.getUint32(0);\n"
-"            const flag = data[4];\n"
-"            const payload = data.slice(5);\n"
-"            return { length: length, flag: flag, payload: payload };\n"
-"        }\n"
-"\n"
-"        function getNALType(h264Data) {\n"
-"            let offset = 0;\n"
-"            if (h264Data[0] === 0 && h264Data[1] === 0 && h264Data[2] === 0 && h264Data[3] === 1) {\n"
-"                offset = 4;\n"
-"            } else if (h264Data[0] === 0 && h264Data[1] === 0 && h264Data[2] === 1) {\n"
-"                offset = 3;\n"
-"            }\n"
-"            if (offset >= h264Data.length) return -1;\n"
-"            return h264Data[offset] & 0x1F;\n"
-"        }\n"
-"\n"
-"        function isKeyFrame(h264Data) {\n"
-"            const nalType = getNALType(h264Data);\n"
-"            // 关键帧类型：5=I帧, 7=SPS, 8=PPS\n"
-"            const result = nalType === 5 || nalType === 7 || nalType === 8;\n"
-"            if (result) {\n"
-"                log('Detected key frame (NAL type: ' + nalType + ')');\n"
-"            }\n"
-"            return result;\n"
-"        }\n"
-"\n"
-"        function isIFrame(h264Data) {\n"
-"            const nalType = getNALType(h264Data);\n"
-"            // I帧：5\n"
-"            return nalType === 5;\n"
-"        }\n"
-"\n"
-"        function isSPSPPS(h264Data) {\n"
-"            const nalType = getNALType(h264Data);\n"
-"            // SPS: 7, PPS: 8\n"
-"            return nalType === 7 || nalType === 8;\n"
-"        }\n"
-"\n"
-"        function extractSPSPPS(data) {\n"
-"            let sps = null;\n"
-"            let pps = null;\n"
-"            let offset = 0;\n"
-"\n"
-"            while (offset < data.length) {\n"
-"                let startCodeLen = 0;\n"
-"                if (offset + 4 <= data.length && data[offset] === 0 && data[offset+1] === 0 && data[offset+2] === 0 && data[offset+3] === 1) {\n"
-"                    startCodeLen = 4;\n"
-"                } else if (offset + 3 <= data.length && data[offset] === 0 && data[offset+1] === 0 && data[offset+2] === 1) {\n"
-"                    startCodeLen = 3;\n"
-"                }\n"
-"\n"
-"                if (startCodeLen === 0) {\n"
-"                    break;\n"
-"                }\n"
-"\n"
-"                const nalStart = offset + startCodeLen;\n"
-"                if (nalStart >= data.length) break;\n"
-"\n"
-"                const nalType = data[nalStart] & 0x1F;\n"
-"\n"
-"                // 查找下一个起始码\n"
-"                let nextStart = data.length;\n"
-"                for (let i = nalStart + 1; i < data.length - 3; i++) {\n"
-"                    if (data[i] === 0 && data[i+1] === 0 && (data[i+2] === 1 || (data[i+2] === 0 && data[i+3] === 1))) {\n"
-"                        nextStart = i;\n"
-"                        break;\n"
-"                    }\n"
-"                }\n"
-"\n"
-"                // 提取NAL数据（包含起始码）\n"
-"                const nalData = data.slice(offset, nextStart);\n"
-"\n"
-"                if (nalType === 7) {\n"
-"                    sps = nalData;\n"
-"                } else if (nalType === 8) {\n"
-"                    pps = nalData;\n"
-"                }\n"
-"\n"
-"                offset = nextStart;\n"
-"            }\n"
-"\n"
-"            return { sps: sps, pps: pps };\n"
-"        }\n"
-"\n"
-"        async function processPendingFrames() {\n"
-"            if (!spsData || !ppsData) {\n"
-"                return;\n"
-"            }\n"
-"            if (pendingFrames.length === 0) {\n"
-"                return;\n"
-"            }\n"
-"            log('Processing ' + pendingFrames.length + ' pending frames');\n"
-"            for (let frame of pendingFrames) {\n"
-"                await decodeFrame(frame.payload, frame.isI);\n"
-"            }\n"
-"            pendingFrames = [];\n"
-"        }\n"
-"\n"
-"        async function decodeFrame(payload, isI) {\n"
-"            // 检查解码器状态，如果不存在或已关闭则重新初始化\n"
-"            if (!videoDecoder || videoDecoder.state === 'closed') {\n"
-"                if (!isI) {\n"
-"                    log('Decoder not ready, skipping P frame');\n"
-"                    return;\n"
-"                }\n"
-"                log('Reinitializing video decoder');\n"
-"                const success = await initVideoDecoder();\n"
-"                if (!success) {\n"
-"                    log('Failed to reinitialize decoder');\n"
-"                    return;\n"
-"                }\n"
-"            }\n"
-"\n"
-"            if (isI) {\n"
-"                log('I frame received, setting receivedKeyFrame=true');\n"
-"                receivedKeyFrame = true;\n"
-"                // 清除超时\n"
-"                if (keyFrameTimeout) {\n"
-"                    clearTimeout(keyFrameTimeout);\n"
-"                    keyFrameTimeout = null;\n"
-"                }\n"
-"            }\n"
-"\n"
-"            // 对于I帧，在数据前面附加SPS和PPS\n"
-"            let frameData = payload;\n"
-"            if (isI && spsData && ppsData) {\n"
-"                // 构造带SPS/PPS的I帧数据\n"
-"                // 格式: [SPS with start code] [PPS with start code] [I frame with start code]\n"
-"                frameData = new Uint8Array(spsData.length + ppsData.length + payload.length);\n"
-"                frameData.set(spsData, 0);\n"
-"                frameData.set(ppsData, spsData.length);\n"
-"                frameData.set(payload, spsData.length + ppsData.length);\n"
-"                log('I frame with SPS/PPS, total size=' + frameData.length);\n"
-"            }\n"
-"\n"
-"            const chunk = new EncodedVideoChunk({\n"
-"                type: isI ? 'key' : 'delta',\n"
-"                timestamp: performance.now() * 1000,\n"
-"                data: frameData\n"
-"            });\n"
-"\n"
-"            try {\n"
-"                await videoDecoder.decode(chunk);\n"
-"            } catch (e) {\n"
-"                if (e.message !== \"Cannot call 'decode' on a closed codec.\") {\n"
-"                    log('Video decode failed: ' + e.message);\n"
-"                }\n"
-"            }\n"
-"        }\n"
-"\n"
-"        async function startLive() {\n"
-"            const serverIp = document.getElementById('serverIp').value;\n"
-"            if (!serverIp) {\n"
-"                alert('Please enter device IP address');\n"
-"                return;\n"
-"            }\n"
-"\n"
-"            if (!videoDecoder) {\n"
-"                const success = await initVideoDecoder();\n"
-"                if (!success) return;\n"
-"            }\n"
-"\n"
-"            if (!audioDecoder) {\n"
-"                await initAudioDecoder();\n"
-"            }\n"
-"\n"
-"            const wsUrl = 'ws://' + serverIp + ':56070';\n"
-"            log('Connecting to live server: ' + wsUrl);\n"
-"\n"
-"            liveWs = new WebSocket(wsUrl);\n"
-"            liveWs.binaryType = 'arraybuffer';\n"
-"\n"
-"            liveWs.onopen = function() {\n"
-"                log('Live WebSocket connected');\n"
-"                updateStatus('Live connected', true);\n"
-"                receivedKeyFrame = false;\n"
-"                decoderConfigured = false;\n"
-"                spsData = null;\n"
-"                ppsData = null;\n"
-"                pendingFrames = [];\n"
-"                // 请求关键帧\n"
-"                liveWs.send(new Uint8Array([0xFF]));\n"
-"                // 设置超时，如果10秒内没有收到关键帧，就停止等待\n"
-"                keyFrameTimeout = setTimeout(function() {\n"
-"                    if (!receivedKeyFrame) {\n"
-"                        log('Key frame timeout, accepting all frames');\n"
-"                        receivedKeyFrame = true;\n"
-"                    }\n"
-"                }, 10000);\n"
-"            }\n"
-"\n"
-"            liveWs.onmessage = async function(event) {\n"
-"                try {\n"
-"                    const data = new Uint8Array(event.data);\n"
-"                    totalBytes += data.length;\n"
-"                    const packet = parsePacket(data);\n"
-"                    if (!packet) {\n"
-"                        return;\n"
-"                    }\n"
-"\n"
-"                    if (packet.flag === 0x80) {\n"
-"                        const nalType = getNALType(packet.payload);\n"
-"                        const isI = nalType === 5;\n"
-"                        const isSPS = nalType === 7;\n"
-"                        const isPPS = nalType === 8;\n"
-"                        const isKey = isI || isSPS || isPPS;\n"
-"\n"
-"                        // 保存SPS/PPS数据（可能合在一起）\n"
-"                        if (isSPS) {\n"
-"                            // 尝试从数据中提取SPS和PPS\n"
-"                            const extracted = extractSPSPPS(packet.payload);\n"
-"                            if (extracted.sps) {\n"
-"                                spsData = extracted.sps;\n"
-"                                log('SPS data extracted, size=' + spsData.length);\n"
-"                            }\n"
-"                            if (extracted.pps) {\n"
-"                                ppsData = extracted.pps;\n"
-"                                log('PPS data extracted, size=' + ppsData.length);\n"
-"                            }\n"
-"                            // 如果有缓冲帧，尝试处理\n"
-"                            await processPendingFrames();\n"
-"                            return;\n"
-"                        }\n"
-"                        if (isPPS) {\n"
-"                            ppsData = packet.payload.slice(0);\n"
-"                            log('PPS data saved, size=' + ppsData.length);\n"
-"                            // 如果有缓冲帧，尝试处理\n"
-"                            await processPendingFrames();\n"
-"                            return;\n"
-"                        }\n"
-"\n"
-"                        // 在收到第一个关键帧之前，跳过P帧\n"
-"                        if (!receivedKeyFrame && !isKey) {\n"
-"                            log('Skipping P frame before key frame');\n"
-"                            return;\n"
-"                        }\n"
-"\n"
-"                        // 如果还没有SPS/PPS数据，缓冲帧\n"
-"                        if (!spsData || !ppsData) {\n"
-"                            log('Buffering frame, waiting for SPS/PPS');\n"
-"                            pendingFrames.push({ payload: packet.payload, isI: isI });\n"
-"                            return;\n"
-"                        }\n"
-"\n"
-"                        // 处理帧\n"
-"                        await decodeFrame(packet.payload, isI);\n"
-"                    } else {\n"
-"                        if (audioDecoder) {\n"
-"                            const chunk = new EncodedAudioChunk({\n"
-"                                type: 'key',\n"
-"                                timestamp: performance.now() * 1000,\n"
-"                                data: packet.payload\n"
-"                            });\n"
-"\n"
-"                            try {\n"
-"                                await audioDecoder.decode(chunk);\n"
-"                            } catch (e) {\n"
-"                                log('Audio decode failed: ' + e.message);\n"
-"                            }\n"
-"                        }\n"
-"                    }\n"
-"                } catch (error) {\n"
-"                    log('Error processing WebSocket message: ' + error.message);\n"
-"                }\n"
-"            }\n"
-"\n"
-"            liveWs.onerror = function(error) {\n"
-"                log('Live WebSocket error');\n"
-"                updateStatus('Live connection error', false);\n"
-"            }\n"
-"\n"
-"            liveWs.onclose = function() {\n"
-"                log('Live WebSocket closed');\n"
-"                updateStatus('Live disconnected', false);\n"
-"                // 清除超时\n"
-"                if (keyFrameTimeout) {\n"
-"                    clearTimeout(keyFrameTimeout);\n"
-"                    keyFrameTimeout = null;\n"
-"                }\n"
-"            }\n"
-"        }\n"
-"\n"
-"        function stopLive() {\n"
-"            if (liveWs) {\n"
-"                liveWs.close();\n"
-"                liveWs = null;\n"
-"            }\n"
-"            receivedKeyFrame = false;\n"
-"            // 清除超时\n"
-"            if (keyFrameTimeout) {\n"
-"                clearTimeout(keyFrameTimeout);\n"
-"                keyFrameTimeout = null;\n"
-"            }\n"
-"            updateStatus('Live stopped', false);\n"
-"        }\n"
-"\n"
-"        async function startPlayback() {\n"
-"            const serverIp = document.getElementById('serverIp').value;\n"
-"            if (!serverIp) {\n"
-"                alert('Please enter device IP address');\n"
-"                return;\n"
-"            }\n"
-"\n"
-"            if (!videoDecoder) {\n"
-"                const success = await initVideoDecoder();\n"
-"                if (!success) return;\n"
-"            }\n"
-"\n"
-"            if (!audioDecoder) {\n"
-"                await initAudioDecoder();\n"
-"            }\n"
-"\n"
-"            const wsUrl = 'ws://' + serverIp + ':56080';\n"
-"            log('Connecting to playback server: ' + wsUrl);\n"
-"\n"
-"            playbackWs = new WebSocket(wsUrl);\n"
-"            playbackWs.binaryType = 'arraybuffer';\n"
-"\n"
-"            playbackWs.onopen = function() {\n"
-"                log('Playback WebSocket connected');\n"
-"                updateStatus('Playback connected', true);\n"
-"                receivedKeyFrame = false;\n"
-"                decoderConfigured = false;\n"
-"                spsData = null;\n"
-"                ppsData = null;\n"
-"                pendingFrames = [];\n"
-"                // 请求关键帧\n"
-"                playbackWs.send(new Uint8Array([0xFF]));\n"
-"                // 设置超时，如果10秒内没有收到关键帧，就停止等待\n"
-"                keyFrameTimeout = setTimeout(function() {\n"
-"                    if (!receivedKeyFrame) {\n"
-"                        log('Key frame timeout, accepting all frames');\n"
-"                        receivedKeyFrame = true;\n"
-"                    }\n"
-"                }, 10000);\n"
-"            }\n"
-"\n"
-"            playbackWs.onmessage = async function(event) {\n"
-"                try {\n"
-"                    const data = new Uint8Array(event.data);\n"
-"                    totalBytes += data.length;\n"
-"                    const packet = parsePacket(data);\n"
-"                    if (!packet) {\n"
-"                        return;\n"
-"                    }\n"
-"\n"
-"                    if (packet.flag === 0x80) {\n"
-"                        const nalType = getNALType(packet.payload);\n"
-"                        const isI = nalType === 5;\n"
-"                        const isSPS = nalType === 7;\n"
-"                        const isPPS = nalType === 8;\n"
-"                        const isKey = isI || isSPS || isPPS;\n"
-"\n"
-"                        // 保存SPS/PPS数据（可能合在一起）\n"
-"                        if (isSPS) {\n"
-"                            // 尝试从数据中提取SPS和PPS\n"
-"                            const extracted = extractSPSPPS(packet.payload);\n"
-"                            if (extracted.sps) {\n"
-"                                spsData = extracted.sps;\n"
-"                                log('SPS data extracted, size=' + spsData.length);\n"
-"                            }\n"
-"                            if (extracted.pps) {\n"
-"                                ppsData = extracted.pps;\n"
-"                                log('PPS data extracted, size=' + ppsData.length);\n"
-"                            }\n"
-"                            // 如果有缓冲帧，尝试处理\n"
-"                            await processPendingFrames();\n"
-"                            return;\n"
-"                        }\n"
-"                        if (isPPS) {\n"
-"                            ppsData = packet.payload.slice(0);\n"
-"                            log('PPS data saved, size=' + ppsData.length);\n"
-"                            // 如果有缓冲帧，尝试处理\n"
-"                            await processPendingFrames();\n"
-"                            return;\n"
-"                        }\n"
-"\n"
-"                        // 在收到第一个关键帧之前，跳过P帧\n"
-"                        if (!receivedKeyFrame && !isKey) {\n"
-"                            log('Skipping P frame before key frame');\n"
-"                            return;\n"
-"                        }\n"
-"\n"
-"                        // 如果还没有SPS/PPS数据，缓冲帧\n"
-"                        if (!spsData || !ppsData) {\n"
-"                            log('Buffering frame, waiting for SPS/PPS');\n"
-"                            pendingFrames.push({ payload: packet.payload, isI: isI });\n"
-"                            return;\n"
-"                        }\n"
-"\n"
-"                        // 处理帧\n"
-"                        await decodeFrame(packet.payload, isI);\n"
-"                    } else {\n"
-"                        if (audioDecoder) {\n"
-"                            const chunk = new EncodedAudioChunk({\n"
-"                                type: 'key',\n"
-"                                timestamp: performance.now() * 1000,\n"
-"                                data: packet.payload\n"
-"                        });\n"
-"\n"
-"                            try {\n"
-"                                await audioDecoder.decode(chunk);\n"
-"                            } catch (e) {\n"
-"                                log('Audio decode failed: ' + e.message);\n"
-"                            }\n"
-"                        }\n"
-"                    }\n"
-"                } catch (error) {\n"
-"                    log('Error processing WebSocket message: ' + error.message);\n"
-"                }\n"
-"            }\n"
-"\n"
-"            playbackWs.onerror = function(error) {\n"
-"                log('Playback WebSocket error');\n"
-"                updateStatus('Playback connection error', false);\n"
-"            }\n"
-"\n"
-"            playbackWs.onclose = function() {\n"
-"                log('Playback WebSocket closed');\n"
-"                updateStatus('Playback disconnected', false);\n"
-"                // 清除超时\n"
-"                if (keyFrameTimeout) {\n"
-"                    clearTimeout(keyFrameTimeout);\n"
-"                    keyFrameTimeout = null;\n"
-"                }\n"
-"            }\n"
-"        }\n"
-"\n"
-"        function stopPlayback() {\n"
-"            if (playbackWs) {\n"
-"                playbackWs.close();\n"
-"                playbackWs = null;\n"
-"            }\n"
-"            receivedKeyFrame = false;\n"
-"            // 清除超时\n"
-"            if (keyFrameTimeout) {\n"
-"                clearTimeout(keyFrameTimeout);\n"
-"                keyFrameTimeout = null;\n"
-"            }\n"
-"            updateStatus('Playback stopped', false);\n"
-"        }\n"
-"\n"
-"        function sendCommand(cmd) {\n"
-"            if (!playbackWs || playbackWs.readyState !== WebSocket.OPEN) {\n"
-"                log('Error: Playback not connected');\n"
-"                return;\n"
-"            }\n"
-"\n"
-"            const commandNames = {\n"
-"                101: 'Rewind',\n"
-"                102: 'Forward',\n"
-"                104: 'Prev File',\n"
-"                105: 'Next File',\n"
-"                107: 'Speed Up',\n"
-"                108: 'Normal Speed'\n"
-"            }\n"
-"\n"
-"            playbackWs.send(new Uint8Array([cmd]));\n"
-"            log('Send command: ' + (commandNames[cmd] || cmd));\n"
-"        }\n"
-"\n"
-"        setInterval(function() {\n"
-"            const now = Date.now();\n"
-"            const elapsed = (now - lastStatsTime) / 1000;\n"
-"\n"
-"            document.getElementById('fps').textContent = Math.round(videoFrameCount / elapsed);\n"
-"            document.getElementById('audioFps').textContent = Math.round(audioFrameCount / elapsed);\n"
-"            document.getElementById('bitrate').textContent = Math.round((totalBytes * 8) / elapsed / 1024) + ' Kbps';\n"
-"\n"
-"            videoFrameCount = 0;\n"
-"            audioFrameCount = 0;\n"
-"            totalBytes = 0;\n"
-"            lastStatsTime = now;\n"
-"        }, 1000);\n"
-"\n"
-"        window.onload = function() {\n"
-"            log('Page loaded');\n"
-"            log('Browser: ' + navigator.userAgent);\n"
-"            checkWebCodecsSupport();\n"
-"        }\n"
-"\n"
-"        window.onbeforeunload = function() {\n"
-"            stopLive();\n"
-"            stopPlayback();\n"
-"        }\n"
-"    </script>\n"
-"</body>\n"
-"</html>\n";
+namespace {
+
+// 取可执行文件所在目录。失败时返回 "."（当前工作目录）
+std::string GetExeDir()
+{
+    char buf[1024] = {0};
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) {
+        CLOG_ERR("readlink /proc/self/exe failed: %s\n", strerror(errno));
+        return ".";
+    }
+    buf[n] = '\0';
+    std::string p(buf);
+    size_t slash = p.find_last_of('/');
+    if (slash == std::string::npos) {
+        return ".";
+    }
+    return p.substr(0, slash);
+}
+
+// 按扩展名推断 MIME。未知后缀统一按 application/octet-stream 处理
+std::string GetMimeType(const std::string& path)
+{
+    size_t dot = path.find_last_of('.');
+    if (dot == std::string::npos) {
+        return "application/octet-stream";
+    }
+    std::string ext = path.substr(dot + 1);
+    for (auto& c : ext) c = (char)tolower(c);
+    if (ext == "html" || ext == "htm") return "text/html; charset=utf-8";
+    if (ext == "js")                  return "application/javascript; charset=utf-8";
+    if (ext == "css")                 return "text/css; charset=utf-8";
+    if (ext == "json")                return "application/json; charset=utf-8";
+    if (ext == "png")                 return "image/png";
+    if (ext == "jpg" || ext == "jpeg")return "image/jpeg";
+    if (ext == "gif")                 return "image/gif";
+    if (ext == "svg")                 return "image/svg+xml";
+    if (ext == "ico")                 return "image/x-icon";
+    if (ext == "woff")                return "font/woff";
+    if (ext == "woff2")               return "font/woff2";
+    if (ext == "txt")                 return "text/plain; charset=utf-8";
+    if (ext == "mp4")                 return "video/mp4";
+    return "application/octet-stream";
+}
+
+// 注：原本这里有一个把整文件读进 std::string 的 ReadFileAll 工具，
+// 在 64MB 内存板子上，回放页面来回点击时会触发 OOM-killer 把进程干掉。
+// 现已改走 SendFileResponse 流式发送（64KB 缓冲循环 read + send），
+// 与文件大小完全解耦，因此本文件不再需要 ReadFileAll。
+
+// 校验 path：以 '/' 起始（HTTP 路径），不能含 ".."；返回去掉前导 '/' 的相对路径
+// 不合法时返回空 string
+std::string SanitizeUrlPath(const std::string& urlPath)
+{
+    if (urlPath.empty() || urlPath[0] != '/') {
+        return std::string();
+    }
+    // 去 query / fragment（防御一下，虽然上层已经分过）
+    std::string p = urlPath;
+    size_t q = p.find_first_of("?#");
+    if (q != std::string::npos) p.resize(q);
+
+    // 拒绝目录穿越
+    if (p.find("..") != std::string::npos) {
+        return std::string();
+    }
+    // 拒绝绝对路径转义（"//" 开头之类）
+    if (p.size() >= 2 && p[1] == '/') {
+        return std::string();
+    }
+    if (p == "/") {
+        return std::string("index.html");
+    }
+    return p.substr(1); // 去掉前导 '/'
+}
+
+} // namespace
 
 C_HttpServer::C_HttpServer(int port)
     : m_port(port)
     , m_server_fd(-1)
     , m_bRunFlag(true)
 {
+    // 默认 web 根：<exe_dir>/web
+    m_webRoot = GetExeDir() + "/web";
+    CLOG_INF("HTTP web root: %s\n", m_webRoot.c_str());
 }
 
 C_HttpServer::~C_HttpServer()
@@ -991,6 +127,7 @@ C_HttpServer::~C_HttpServer()
 
 int C_HttpServer::Start()
 {
+    // ---------------- HTTP 监听 ----------------
     // Create socket
     m_server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (m_server_fd < 0) {
@@ -1036,10 +173,43 @@ int C_HttpServer::Start()
     CLOG_INF("HTTP server started on port %d\n", m_port);
     CLOG_INF("Access URL: http://<device-ip>:%d\n", m_port);
 
+    // ---------------- HTTPS 监听（可选） ----------------
+    if (m_pTls && m_tlsPort > 0) {
+        m_tlsServerFd = socket(AF_INET, SOCK_STREAM, 0);
+        if (m_tlsServerFd < 0) {
+            CLOG_ERR("HTTPS socket creation failed: %s\n", strerror(errno));
+        } else {
+            int o = 1;
+            setsockopt(m_tlsServerFd, SOL_SOCKET, SO_REUSEADDR, &o, sizeof(o));
+            int fl = fcntl(m_tlsServerFd, F_GETFL, 0);
+            fcntl(m_tlsServerFd, F_SETFL, fl | O_NONBLOCK);
+            struct sockaddr_in addr2;
+            memset(&addr2, 0, sizeof(addr2));
+            addr2.sin_family = AF_INET;
+            addr2.sin_addr.s_addr = INADDR_ANY;
+            addr2.sin_port = htons(m_tlsPort);
+            if (bind(m_tlsServerFd, (struct sockaddr*)&addr2, sizeof(addr2)) < 0 ||
+                listen(m_tlsServerFd, 10) < 0) {
+                CLOG_ERR("HTTPS bind/listen failed: %s\n", strerror(errno));
+                close(m_tlsServerFd);
+                m_tlsServerFd = -1;
+            } else {
+                CLOG_INF("HTTPS server started on port %d\n", m_tlsPort);
+                CLOG_INF("Access URL: https://<device-ip>:%d\n", m_tlsPort);
+            }
+        }
+    }
+
     // Start accept thread
     m_acceptThread = std::thread(&C_HttpServer::AcceptThread, this);
 
     return 0;
+}
+
+void C_HttpServer::EnableTls(int tlsPort, C_TlsContext* pTls)
+{
+    m_tlsPort = tlsPort;
+    m_pTls    = pTls;
 }
 
 void C_HttpServer::Stop()
@@ -1061,6 +231,11 @@ void C_HttpServer::Stop()
 
     if (m_server_fd >= 0) {
         close(m_server_fd);
+        m_server_fd = -1;
+    }
+    if (m_tlsServerFd >= 0) {
+        close(m_tlsServerFd);
+        m_tlsServerFd = -1;
     }
 
     CLOG_INF("HTTP server stopped\n");
@@ -1074,16 +249,13 @@ void C_HttpServer::AcceptThread()
     while (m_bRunFlag) {
         FD_ZERO(&read_fds);
         FD_SET(m_server_fd, &read_fds);
-
-        // Add all clients to fd_set
         int max_fd = m_server_fd;
-        {
-            std::lock_guard<std::mutex> lock(m_clientsMutex);
-            for (int fd : m_clientFds) {
-                FD_SET(fd, &read_fds);
-                if (fd > max_fd) max_fd = fd;
-            }
+        if (m_tlsServerFd >= 0) {
+            FD_SET(m_tlsServerFd, &read_fds);
+            if (m_tlsServerFd > max_fd) max_fd = m_tlsServerFd;
         }
+        // 注：客户端 fd 不再加入 select —— 客户端处理走 detached thread，
+        //   原代码这里加 client fd 没有意义（select 命中也不消费），保持简化。
 
         tv.tv_sec = 0;
         tv.tv_usec = 50000; // 50ms timeout
@@ -1098,43 +270,151 @@ void C_HttpServer::AcceptThread()
             continue;
         }
 
-        // Handle new connection
-        if (FD_ISSET(m_server_fd, &read_fds)) {
+        // 处理新连接：HTTP/HTTPS 共用同一个 ProcessClient，差别仅在握手阶段
+        auto handleAccept = [this](int listenFd, bool isTls) {
             struct sockaddr_in client_addr;
             socklen_t addr_len = sizeof(client_addr);
-            int new_fd = accept(m_server_fd, (struct sockaddr *)&client_addr, &addr_len);
+            int new_fd = accept(listenFd, (struct sockaddr *)&client_addr, &addr_len);
+            if (new_fd < 0) return;
 
-            if (new_fd >= 0) {
-                // Set non-blocking
-                int flags = fcntl(new_fd, F_GETFL, 0);
-                fcntl(new_fd, F_SETFL, flags | O_NONBLOCK);
-
-                // Add to client set
-                {
-                    std::lock_guard<std::mutex> lock(m_clientsMutex);
-                    m_clientFds.insert(new_fd);
+            // ---- 并发上限保命：超出 m_maxConcurrent 直接拒绝，避免 detach 出大量线程
+            // 把内存撑爆触发 std::bad_alloc → terminate（这是之前观察到的崩溃模式）
+            if (m_activeClients.load(std::memory_order_relaxed) >= m_maxConcurrent) {
+                CLOG_ERR("HTTP%s reject new fd=%d: active=%d >= max=%d\n",
+                         isTls ? "S" : "", new_fd,
+                         m_activeClients.load(), m_maxConcurrent);
+                // HTTP 明文场景给个 503，让浏览器知道排队；TLS 还没握手就直接 close
+                if (!isTls) {
+                    const char* msg =
+                        "HTTP/1.0 503 Service Unavailable\r\n"
+                        "Content-Length: 0\r\n"
+                        "Connection: close\r\n\r\n";
+                    send(new_fd, msg, (int)strlen(msg), MSG_NOSIGNAL);
                 }
-
-                CLOG_INF("HTTP new client connected: fd=%d\n", new_fd);
-
-                // Start client processing thread
-                std::thread clientThread(&C_HttpServer::ProcessClient, this, new_fd);
-                clientThread.detach();
+                close(new_fd);
+                return;
             }
+
+            // Set non-blocking
+            int flags = fcntl(new_fd, F_GETFL, 0);
+            fcntl(new_fd, F_SETFL, flags | O_NONBLOCK);
+
+            std::shared_ptr<C_SslConn> sslConn;
+            if (isTls) {
+                // TLS 握手是阻塞-轮询的（最多 5s）；放在 accept 线程里会拖慢新连接接入，
+                // 但 HTTP 服务连接频率不高，暂时简单做。后续如需可移到 client thread 内。
+                auto u = m_pTls->AcceptOnFd(new_fd);
+                if (!u) {
+                    close(new_fd);
+                    return;
+                }
+                sslConn = std::shared_ptr<C_SslConn>(u.release());
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(m_clientsMutex);
+                m_clientFds.insert(new_fd);
+            }
+            // 计数 +1，ProcessClient 退出时 -1（在那里用 RAII 释放）
+            m_activeClients.fetch_add(1, std::memory_order_relaxed);
+            CLOG_INF("HTTP%s new client connected: fd=%d (active=%d)\n",
+                     isTls ? "S" : "", new_fd, m_activeClients.load());
+
+            std::thread clientThread(&C_HttpServer::ProcessClient, this, new_fd, sslConn);
+            clientThread.detach();
+        };
+
+        if (FD_ISSET(m_server_fd, &read_fds)) {
+            handleAccept(m_server_fd, false);
+        }
+        if (m_tlsServerFd >= 0 && FD_ISSET(m_tlsServerFd, &read_fds)) {
+            handleAccept(m_tlsServerFd, true);
         }
     }
 }
 
-void C_HttpServer::ProcessClient(int fd)
+int C_HttpServer::IoRead(int fd, C_SslConn* ssl, void* buf, int len, bool& wantMore)
 {
+    wantMore = false;
+    if (ssl) {
+        return ssl->Read(buf, len, wantMore);
+    }
+    ssize_t n = recv(fd, buf, len, 0);
+    if (n >= 0) return (int)n;
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+        wantMore = true;
+        return -1;
+    }
+    return -1;
+}
+
+int C_HttpServer::IoWrite(int fd, C_SslConn* ssl, const void* buf, int len, bool& wantMore)
+{
+    wantMore = false;
+    if (ssl) {
+        return ssl->Write(buf, len, wantMore);
+    }
+    ssize_t n = send(fd, buf, len, MSG_NOSIGNAL);
+    if (n >= 0) return (int)n;
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+        wantMore = true;
+        return -1;
+    }
+    return -1;
+}
+
+void C_HttpServer::ProcessClient(int fd, std::shared_ptr<C_SslConn> ssl)
+{
+    // RAII：无论从哪条路径退出，都会把活跃连接计数 -1
+    struct ActiveGuard {
+        std::atomic<int>* p;
+        ~ActiveGuard() { if (p) p->fetch_sub(1, std::memory_order_relaxed); }
+    } _g{ &m_activeClients };
+
     std::vector<char> buffer(4096);
     std::string request;
 
+    // Body 完整性判定：HTTP 头到达后还需根据 Content-Length 继续读，
+    // 否则 POST /api/photo/delete 这种 body 几 KB 的请求会因 TCP 分段
+    // 在第一段就被 dispatch，造成 JSON parser 看到截断的 names 数组而
+    // 解析为空，返回 deleted=0（前端表现为"删除中..."后无任何变化）。
+    size_t headEnd     = std::string::npos;
+    size_t contentLen  = 0;
+    bool   haveCL      = false;
+
+    auto parseHeaderOnce = [&]() {
+        if (headEnd != std::string::npos) return;
+        headEnd = request.find("\r\n\r\n");
+        if (headEnd == std::string::npos) return;
+
+        // 不区分大小写查找 Content-Length:
+        const std::string head = request.substr(0, headEnd);
+        const std::string keyLow = "content-length:";
+        std::string headLow(head.size(), ' ');
+        for (size_t i = 0; i < head.size(); ++i) headLow[i] = (char)tolower((unsigned char)head[i]);
+
+        size_t kp = headLow.find(keyLow);
+        if (kp != std::string::npos) {
+            size_t vp = kp + keyLow.size();
+            // 跳过空白
+            while (vp < head.size() && (head[vp] == ' ' || head[vp] == '\t')) ++vp;
+            size_t le = head.find("\r\n", vp);
+            if (le == std::string::npos) le = head.size();
+            try {
+                contentLen = (size_t)std::stoul(head.substr(vp, le - vp));
+                haveCL = true;
+            } catch (...) {
+                contentLen = 0;
+            }
+        }
+    };
+
     while (m_bRunFlag) {
-        ssize_t n = recv(fd, buffer.data(), buffer.size(), 0);
+        bool wantMore = false;
+        int n = IoRead(fd, ssl.get(), buffer.data(), (int)buffer.size(), wantMore);
 
         if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (wantMore) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
@@ -1148,13 +428,26 @@ void C_HttpServer::ProcessClient(int fd)
 
         request.append(buffer.data(), n);
 
-        // Check if complete HTTP request received
-        if (request.find("\r\n\r\n") != std::string::npos) {
-            // Handle HTTP request
-            HandleHttpRequest(fd, request);
-            break; // Close connection after handling request (HTTP 1.0)
+        parseHeaderOnce();
+        if (headEnd == std::string::npos) {
+            // 请求头还没收完，继续读
+            continue;
         }
+
+        // 头已就绪：根据 Content-Length 判定 body 是否够长；
+        // 若没有 Content-Length（GET 等），头到即视为完整。
+        size_t needTotal = headEnd + 4 + (haveCL ? contentLen : 0);
+        if (request.size() < needTotal) {
+            continue;
+        }
+
+        // 完整请求到达
+        HandleHttpRequest(fd, ssl.get(), request);
+        break; // Close connection after handling request (HTTP 1.0)
     }
+
+    // 主动 SSL_shutdown，避免对端报 connection reset
+    if (ssl) ssl->Shutdown();
 
     // Close connection
     {
@@ -1164,12 +457,12 @@ void C_HttpServer::ProcessClient(int fd)
     close(fd);
 }
 
-void C_HttpServer::HandleHttpRequest(int fd, const std::string& request)
+void C_HttpServer::HandleHttpRequest(int fd, C_SslConn* ssl, const std::string& request)
 {
     // Parse request line
     size_t lineEnd = request.find("\r\n");
     if (lineEnd == std::string::npos) {
-        SendHttpResponse(fd, 400, "Bad Request", "text/plain", "Invalid HTTP request");
+        SendHttpResponse(fd, ssl, 400, "Bad Request", "text/plain", "Invalid HTTP request");
         return;
     }
 
@@ -1180,31 +473,181 @@ void C_HttpServer::HandleHttpRequest(int fd, const std::string& request)
     size_t space2 = requestLine.find(' ', space1 + 1);
 
     if (space1 == std::string::npos || space2 == std::string::npos) {
-        SendHttpResponse(fd, 400, "Bad Request", "text/plain", "Invalid HTTP request");
+        SendHttpResponse(fd, ssl, 400, "Bad Request", "text/plain", "Invalid HTTP request");
         return;
     }
 
     std::string method = requestLine.substr(0, space1);
-    std::string path = requestLine.substr(space1 + 1, space2 - space1 - 1);
+    std::string rawPath= requestLine.substr(space1 + 1, space2 - space1 - 1);
 
-    CLOG_INF("HTTP request: %s %s\n", method.c_str(), path.c_str());
-
-    // Handle GET request
-    if (method == "GET") {
-        if (path == "/" || path == "/index.html") {
-            // Return web_player.html
-            SendHttpResponse(fd, 200, "OK", "text/html; charset=utf-8", WEB_PLAYER_HTML);
-        } else {
-            // 404 Not Found
-            SendHttpResponse(fd, 404, "Not Found", "text/plain", "404 Not Found");
+    // 剥离 query：path?query —— path 用于路由匹配，query 透传给 handler
+    std::string path  = rawPath;
+    std::string query;
+    {
+        size_t q = path.find('?');
+        if (q != std::string::npos) {
+            query = path.substr(q + 1);
+            path.resize(q);
         }
-    } else {
-        // 405 Method Not Allowed
-        SendHttpResponse(fd, 405, "Method Not Allowed", "text/plain", "Method Not Allowed");
     }
+
+    CLOG_INF("HTTP request: %s %s\n", method.c_str(), rawPath.c_str());
+
+    // 提取 body（"\r\n\r\n" 之后的内容）。GET 通常无 body，POST 用得到
+    std::string body;
+    size_t headEnd = request.find("\r\n\r\n");
+    if (headEnd != std::string::npos) {
+        body = request.substr(headEnd + 4);
+    }
+
+    // 提取 Range 头（不区分大小写），API 流式文件分支和静态文件分支都需要。
+    // 浏览器 <video> 拖动 + 回放页"来回点击"都会带 Range；返回 206 只发
+    // 请求的一段，避免每次几百 KB 全量下载。
+    std::string rangeHeader;
+    {
+        size_t hdrLimit = (headEnd != std::string::npos) ? headEnd : request.size();
+        const char* hay = request.c_str();
+        for (size_t i = 0; i + 7 < hdrLimit; ++i) {
+            if (hay[i] == '\r' && hay[i+1] == '\n' &&
+                (hay[i+2]=='R'||hay[i+2]=='r') &&
+                (hay[i+3]=='A'||hay[i+3]=='a') &&
+                (hay[i+4]=='N'||hay[i+4]=='n') &&
+                (hay[i+5]=='G'||hay[i+5]=='g') &&
+                (hay[i+6]=='E'||hay[i+6]=='e') &&
+                hay[i+7]==':')
+            {
+                size_t s = i + 8;
+                while (s < hdrLimit && (hay[s]==' '||hay[s]=='\t')) ++s;
+                size_t e = s;
+                while (e < hdrLimit && hay[e] != '\r') ++e;
+                rangeHeader.assign(hay + s, hay + e);
+                break;
+            }
+        }
+    }
+
+    // 优先尝试 API 路由（method + path 精确匹配）
+    {
+        ApiResponse apiResp;
+        if (TryDispatchApi(method, path, query, body, apiResp)) {
+            // API 可以选择"流式文件"模式：填 filePath 即可，httpServer
+            // 用 64KB 缓冲流式吐出去，避免把整文件 ReadAll 进 std::string。
+            // /record/*.mp4 和 /photo/*.jpg 走的就是这条路径，是上次回放
+            // 页面来回点击触发 OOM 的根因修复。
+            if (!apiResp.filePath.empty()) {
+                SendFileResponse(fd, ssl, apiResp.filePath, apiResp.contentType, rangeHeader);
+            } else {
+                SendHttpResponse(fd, ssl, apiResp.status,
+                                 apiResp.status == 200 ? "OK" : "ERROR",
+                                 apiResp.contentType, apiResp.body);
+            }
+            return;
+        }
+    }
+
+    if (method != "GET") {
+        SendHttpResponse(fd, ssl, 405, "Method Not Allowed", "text/plain", "Method Not Allowed");
+        return;
+    }
+
+    // 路径合法性校验 + 归一化
+    std::string rel = SanitizeUrlPath(path);
+    if (rel.empty()) {
+        SendHttpResponse(fd, ssl, 400, "Bad Request", "text/plain", "Invalid path");
+        return;
+    }
+
+    // 拼接 webRoot 后读盘
+    std::string fullPath = m_webRoot + "/" + rel;
+
+    // 拒绝读到目录上去
+    struct stat st{};
+    if (stat(fullPath.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+        CLOG_INF("HTTP 404: %s (full=%s)\n", path.c_str(), fullPath.c_str());
+        SendHttpResponse(fd, ssl, 404, "Not Found", "text/plain", "404 Not Found");
+        return;
+    }
+
+    // 流式发送：边读边发，常驻只占 64KB；mp4 几百 MB 也不会爆内存。
+    SendFileResponse(fd, ssl, fullPath, GetMimeType(rel), rangeHeader);
 }
 
-void C_HttpServer::SendHttpResponse(int fd, int statusCode, const std::string& statusText,
+void C_HttpServer::RegisterApi(const std::string& method,
+                               const std::string& path,
+                               ApiHandler handler)
+{
+    if (!handler) return;
+    std::lock_guard<std::mutex> lk(m_apiMutex);
+    std::string key = method + " " + path;
+    m_apiHandlers[key] = std::move(handler);
+    CLOG_INF("HTTP API registered: %s\n", key.c_str());
+}
+
+void C_HttpServer::RegisterApiPrefix(const std::string& method,
+                                     const std::string& prefix,
+                                     ApiHandler handler)
+{
+    if (!handler) return;
+    std::lock_guard<std::mutex> lk(m_apiMutex);
+    m_apiPrefixHandlers.emplace_back(method + " " + prefix, std::move(handler));
+    CLOG_INF("HTTP API prefix registered: %s%s\n", method.c_str(), (" " + prefix).c_str());
+}
+
+bool C_HttpServer::TryDispatchApi(const std::string& method,
+                                  const std::string& path,
+                                  const std::string& query,
+                                  const std::string& body,
+                                  ApiResponse& out)
+{
+    // path 在调用方已经剥过 query，这里直接用
+    const std::string& p = path;
+
+    ApiHandler h;
+    {
+        std::lock_guard<std::mutex> lk(m_apiMutex);
+        auto it = m_apiHandlers.find(method + " " + p);
+        if (it != m_apiHandlers.end()) {
+            h = it->second;
+        } else {
+            // 再扫前缀路由
+            std::string mp = method + " ";
+            for (auto& kv : m_apiPrefixHandlers) {
+                const std::string& key = kv.first; // "METHOD prefix"
+                if (key.size() <= mp.size())              continue;
+                if (key.compare(0, mp.size(), mp) != 0)   continue;
+                std::string pfx = key.substr(mp.size());
+                if (p.size() >= pfx.size() &&
+                    p.compare(0, pfx.size(), pfx) == 0) {
+                    h = kv.second;
+                    break;
+                }
+            }
+            if (!h) return false;
+        }
+    }
+
+    ApiRequest req;
+    req.method = method;
+    req.path   = p;
+    req.query  = query;
+    req.body   = body;
+    try {
+        out = h(req);
+    } catch (const std::exception& e) {
+        CLOG_ERR("HTTP API handler exception: %s\n", e.what());
+        out.status = 500;
+        out.contentType = "text/plain";
+        out.body = std::string("internal error: ") + e.what();
+    } catch (...) {
+        out.status = 500;
+        out.contentType = "text/plain";
+        out.body = "internal error";
+    }
+    return true;
+}
+
+void C_HttpServer::SendHttpResponse(int fd, C_SslConn* ssl,
+                                   int statusCode, const std::string& statusText,
                                    const std::string& contentType, const std::string& content)
 {
     std::string response = "HTTP/1.1 " + std::to_string(statusCode) + " " + statusText + "\r\n";
@@ -1217,7 +660,187 @@ void C_HttpServer::SendHttpResponse(int fd, int statusCode, const std::string& s
     response += "\r\n";
     response += content;
 
-    send(fd, response.c_str(), response.length(), MSG_NOSIGNAL);
+    // 头 + 体一起阻塞写（仍然只为"短响应"使用：API JSON / 4xx 文本等）。
+    // 大文件请走 SendFileResponse —— 那条路只把 64KB 缓冲塞 socket，永远不会
+    // 把整文件 + response 拼在一起出现 2× 内存峰值。
+    WriteAllBlocking(fd, ssl, response.data(), response.size());
+}
+
+bool C_HttpServer::WriteAllBlocking(int fd, C_SslConn* ssl, const char* buf, size_t len)
+{
+    // 非阻塞 socket 单次 send 可能 short write，尤其几百 KB 数据；
+    // 这里循环写直到全部发完或对端断开/超时。TLS 同理（SSL_write 也可能 want_write）。
+    const char* p   = buf;
+    size_t      rem = len;
+    while (rem > 0) {
+        bool wantMore = false;
+        int n = IoWrite(fd, ssl, p, (int)rem, wantMore);
+        if (n > 0) {
+            p   += n;
+            rem -= (size_t)n;
+            continue;
+        }
+        if (n < 0 && wantMore) {
+            // 对端缓冲区暂满或 TLS 内部需要更多 IO，等可写。
+            // 注意：超时不能太长，否则浏览器来回切片导致大量 fd 滞留服务端，
+            // 在 64MB 板子上很容易堆积线程引爆 OOM。1s 已经足够区分"瞬时拥塞"
+            // 与"对端真断连"（TCP RST 后 select 立即返回 r=1，send 才报 EPIPE）。
+            fd_set wfds;
+            FD_ZERO(&wfds); FD_SET(fd, &wfds);
+            struct timeval tv; tv.tv_sec = 1; tv.tv_usec = 0;
+            int r = select(fd + 1, NULL, &wfds, NULL, &tv);
+            if (r <= 0) {
+                // 静默：用户来回切片产生大量"主动 abort"是正常现象，不必每次刷一行 ERR
+                return false;
+            }
+            continue;
+        }
+        CLOG_ERR("HTTP send fail: %s (rem=%zu)\n", strerror(errno), rem);
+        return false;
+    }
+    return true;
+}
+
+// 解析 HTTP "Range:" 头，仅支持单段 "bytes=START-END"（END 可省略）。
+// 返回 true 时填 outFirst/outLast；返回 false 表示语法错误或多段（应回 416）。
+// 调用者拿到 [first, last] 后还要自己 clamp 到文件长度。
+static bool ParseSimpleRange(const std::string& rangeHeader,
+                             int64_t fileSize,
+                             int64_t& outFirst,
+                             int64_t& outLast)
+{
+    // 形如 "bytes=0-499", "bytes=500-", "bytes=-500"（最后 500 字节）
+    if (rangeHeader.empty() || fileSize <= 0) return false;
+    const std::string prefix = "bytes=";
+    if (rangeHeader.compare(0, prefix.size(), prefix) != 0) return false;
+    std::string r = rangeHeader.substr(prefix.size());
+    // 多段（含逗号）暂不支持
+    if (r.find(',') != std::string::npos) return false;
+    size_t dash = r.find('-');
+    if (dash == std::string::npos) return false;
+    std::string s1 = r.substr(0, dash);
+    std::string s2 = r.substr(dash + 1);
+    auto trim = [](std::string& s){
+        while (!s.empty() && (s.front()==' '||s.front()=='\t')) s.erase(s.begin());
+        while (!s.empty() && (s.back() ==' '||s.back() =='\t')) s.pop_back();
+    };
+    trim(s1); trim(s2);
+
+    if (s1.empty()) {
+        // "-N" 表示最后 N 字节
+        if (s2.empty()) return false;
+        int64_t n = (int64_t)strtoll(s2.c_str(), nullptr, 10);
+        if (n <= 0) return false;
+        if (n > fileSize) n = fileSize;
+        outFirst = fileSize - n;
+        outLast  = fileSize - 1;
+        return true;
+    }
+    int64_t first = (int64_t)strtoll(s1.c_str(), nullptr, 10);
+    int64_t last;
+    if (s2.empty()) {
+        last = fileSize - 1;
+    } else {
+        last = (int64_t)strtoll(s2.c_str(), nullptr, 10);
+    }
+    if (first < 0 || last < first) return false;
+    if (last >= fileSize) last = fileSize - 1;
+    outFirst = first;
+    outLast  = last;
+    return true;
+}
+
+void C_HttpServer::SendFileResponse(int fd, C_SslConn* ssl,
+                                    const std::string& fullPath,
+                                    const std::string& contentType,
+                                    const std::string& rangeHeader)
+{
+    // 1) 用 open 而不是 ifstream，避免任何把文件内容读进 string 的中间态
+    int ffd = open(fullPath.c_str(), O_RDONLY | O_CLOEXEC);
+    if (ffd < 0) {
+        CLOG_ERR("SendFileResponse open fail: %s (%s)\n", fullPath.c_str(), strerror(errno));
+        SendHttpResponse(fd, ssl, 500, "Internal Server Error", "text/plain", "open fail");
+        return;
+    }
+    struct stat st{};
+    if (fstat(ffd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        close(ffd);
+        SendHttpResponse(fd, ssl, 404, "Not Found", "text/plain", "404 Not Found");
+        return;
+    }
+    const int64_t fileSize = (int64_t)st.st_size;
+
+    // 2) 解析 Range（可选）
+    int64_t first = 0, last = fileSize - 1;
+    bool isPartial = false;
+    if (!rangeHeader.empty()) {
+        if (ParseSimpleRange(rangeHeader, fileSize, first, last)) {
+            isPartial = true;
+        } else {
+            // 语法错或不支持的多段：返回 416
+            close(ffd);
+            std::string body = "Requested Range Not Satisfiable";
+            std::string hdr  = "HTTP/1.1 416 Requested Range Not Satisfiable\r\n";
+            hdr += "Content-Type: text/plain\r\n";
+            hdr += "Content-Range: bytes */" + std::to_string(fileSize) + "\r\n";
+            hdr += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+            hdr += "Connection: close\r\n\r\n";
+            hdr += body;
+            WriteAllBlocking(fd, ssl, hdr.data(), hdr.size());
+            return;
+        }
+    }
+    const int64_t sendLen = last - first + 1;
+
+    // 3) 拼响应头（不含 body），单独发送，body 走流式
+    std::string hdr;
+    hdr.reserve(256);
+    if (isPartial) {
+        hdr += "HTTP/1.1 206 Partial Content\r\n";
+    } else {
+        hdr += "HTTP/1.1 200 OK\r\n";
+    }
+    hdr += "Content-Type: " + contentType + "\r\n";
+    hdr += "Accept-Ranges: bytes\r\n";
+    hdr += "Content-Length: " + std::to_string(sendLen) + "\r\n";
+    if (isPartial) {
+        hdr += "Content-Range: bytes " + std::to_string(first) + "-" +
+               std::to_string(last) + "/" + std::to_string(fileSize) + "\r\n";
+    }
+    hdr += "Connection: close\r\n";
+    // mp4/jpeg 这类静态资源允许浏览器短缓存，避免回放页拖动反复全量下载
+    hdr += "Cache-Control: public, max-age=60\r\n";
+    hdr += "\r\n";
+
+    if (!WriteAllBlocking(fd, ssl, hdr.data(), hdr.size())) {
+        close(ffd);
+        return;
+    }
+
+    // 4) seek + 流式 64KB 循环读发，永远不在堆上保留整文件
+    if (first > 0 && lseek(ffd, (off_t)first, SEEK_SET) == (off_t)-1) {
+        CLOG_ERR("SendFileResponse lseek fail: %s\n", strerror(errno));
+        close(ffd);
+        return;
+    }
+    char buf[64 * 1024];
+    int64_t remain = sendLen;
+    while (remain > 0) {
+        size_t want = (remain > (int64_t)sizeof(buf)) ? sizeof(buf) : (size_t)remain;
+        ssize_t got = read(ffd, buf, want);
+        if (got <= 0) {
+            if (got < 0 && (errno == EINTR)) continue;
+            CLOG_ERR("SendFileResponse read fail/short: got=%zd errno=%s rem=%lld\n",
+                     got, strerror(errno), (long long)remain);
+            break;
+        }
+        if (!WriteAllBlocking(fd, ssl, buf, (size_t)got)) {
+            // 对端早断（用户来回点击 → 浏览器 abort 旧请求），属正常情况
+            break;
+        }
+        remain -= got;
+    }
+    close(ffd);
 }
 
 int C_HttpServer::GetClientCount()
