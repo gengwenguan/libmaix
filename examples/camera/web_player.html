@@ -36,9 +36,10 @@
         .cfg-section legend { padding:0 6px; color:var(--accent); font-weight:600; }
         .cfg-row { display:flex; align-items:center; gap:10px; margin:8px 0; flex-wrap:wrap; }
         .cfg-row label { display:flex; align-items:center; gap:6px; min-width:200px; }
-        .cfg-row input[type="number"] { width:120px; padding:4px 8px;
-                                        background:#1c2740; color:#fff;
-                                        border:1px solid #2c3c5b; border-radius:4px; }
+        .cfg-row input[type="number"], .cfg-row select { width:120px; padding:4px 8px;
+                                                         background:#1c2740; color:#fff;
+                                                         border:1px solid #2c3c5b; border-radius:4px; }
+        .cfg-row select { width:240px; }
         .cfg-row input[type="checkbox"] { width:16px; height:16px; }
         .hint-inline { color:#8aa1bf; font-size:12px; }
         .panes { background: var(--panel-bg); border-radius:0 0 12px 12px;
@@ -347,6 +348,27 @@
                     <label>JPEG 质量(30~100)
                         <input type="number" id="cfg_photo_jpeg_qual" step="1" min="30" max="100">
                     </label>
+                </div>
+            </fieldset>
+
+            <fieldset class="cfg-section">
+                <legend>麦克风滤波</legend>
+                <div class="cfg-row">
+                    <label>滤波模式
+                        <select id="cfg_mic_filter_mode">
+                            <option value="0">关闭（原始声音）</option>
+                            <option value="1">均衡推荐（HP120 + 陷波）</option>
+                            <option value="2">激进（HP150 + 强陷波）</option>
+                            <option value="3">精细（压低 300~800Hz 残留）</option>
+                            <option value="4">极激进（最薄但更安静）</option>
+                            <option value="5">均衡 + 噪声门</option>
+                        </select>
+                    </label>
+                    <span class="hint-inline">保存后即时生效；推荐先用“均衡推荐”</span>
+                </div>
+                <div class="hint">
+                    这些模式来自后 25 秒安静样本分析：主噪声为 50Hz 附近电流声及倍频。
+                    模式越激进越安静，但人声低频会越薄；噪声门在静音时最干净，可能有开关门感。
                 </div>
             </fieldset>
 
@@ -2138,7 +2160,7 @@
         'cfg_vmd_enabled', 'cfg_vmd_pixel_thresh', 'cfg_vmd_area_ratio',
         'cfg_vmd_min_interval_s', 'cfg_vmd_check_fps',
         'cfg_record_segment_s', 'cfg_record_retain_days', 'cfg_record_max_gb',
-        'cfg_album_max_photos', 'cfg_photo_jpeg_qual',
+        'cfg_album_max_photos', 'cfg_photo_jpeg_qual', 'cfg_mic_filter_mode',
         'cfg_osd_show_ip', 'cfg_osd_show_time', 'cfg_osd_show_ai_box'
     ];
     const cfgStat = () => document.getElementById('cfgStat');
@@ -2168,6 +2190,7 @@
         cfgEl.cfg_record_max_gb.value        = gb;
         cfgEl.cfg_album_max_photos.value     = c.album_max_photos;
         cfgEl.cfg_photo_jpeg_qual.value      = c.photo_jpeg_qual;
+        cfgEl.cfg_mic_filter_mode.value      = (c.mic_filter_mode !== undefined) ? c.mic_filter_mode : 0;
         cfgEl.cfg_osd_show_ip.checked        = !!c.osd_show_ip;
         cfgEl.cfg_osd_show_time.checked      = !!c.osd_show_time;
         cfgEl.cfg_osd_show_ai_box.checked    = (c.osd_show_ai_box !== undefined) ? !!c.osd_show_ai_box : true;
@@ -2202,6 +2225,7 @@
             record_max_bytes:   gb * 1024 * 1024 * 1024,
             album_max_photos:   parseInt(cfgEl.cfg_album_max_photos.value, 10),
             photo_jpeg_qual:    parseInt(cfgEl.cfg_photo_jpeg_qual.value, 10),
+            mic_filter_mode:    parseInt(cfgEl.cfg_mic_filter_mode.value, 10),
             osd_show_ip:        cfgEl.cfg_osd_show_ip.checked,
             osd_show_time:      cfgEl.cfg_osd_show_time.checked,
             osd_show_ai_box:    cfgEl.cfg_osd_show_ai_box.checked,

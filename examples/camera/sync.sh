@@ -23,12 +23,13 @@ DEVICE_DIR="/root/maix_dist"
 DEVICE_PASS="root"          # 开发板 ssh 密码（与 scppush.sh 保持一致）
 
 # 启动 camera 时注入的环境变量。每行一条 KEY=VALUE，留空即不注入。
-# 调试用法（验证 AAC 编码音质）：
-#   EXTRA_ENV="AAC_DUMP_PATH=/tmp/test.aac"
+# 调试用法：
+#   EXTRA_ENV="AAC_DUMP_PATH=/tmp/test.aac" ./sync.sh push
+#   EXTRA_ENV=$'MIC_PCM_DUMP_PATH=/tmp/mic.wav\nMIC_PCM_DUMP_SEC=30' ./sync.sh push
 # 验证完后置空，避免每次都 dump 占用空间。
 # 录像参数（segment / retain / max_bytes）已统一从 web 配置面板读取，
 # 不再支持 RECORD_* 环境变量，留空即可。
-EXTRA_ENV=""
+EXTRA_ENV="${EXTRA_ENV:-}"
 
 # 兼容老版本 sshd 的算法白名单：开发板通常只提供 ssh-rsa(SHA-1)，
 # 新版 OpenSSH(>=8.7) 默认禁用，必须显式打开。

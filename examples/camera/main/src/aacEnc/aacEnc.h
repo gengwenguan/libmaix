@@ -11,6 +11,8 @@
 #include <iostream>
 #include <thread>
 #include <mutex>
+#include <cstdint>
+#include <cstdio>
 
 extern "C" {
     #include <alsa/asoundlib.h>
@@ -41,6 +43,13 @@ public:
         virtual int OnOutputAac(unsigned char* data, unsigned int dataLen,
                                 int64_t ptsUs) = 0;
     };
+    struct Biquad {
+        double b0 = 1.0, b1 = 0.0, b2 = 0.0;
+        double a1 = 0.0, a2 = 0.0;
+        double z1 = 0.0, z2 = 0.0;
+        double Process(double x);
+        void Reset();
+    };
 public:
     C_AacEnc(C_Listener* pListener);
     ~C_AacEnc();
@@ -59,6 +68,8 @@ private:
     void EncodeOneFrame();
     // 构造 AudioSpecificConfig（2字节）
     void BuildAudioSpecificConfig();
+    // 按配置页选择的 preset，对原始 S16 PCM 做轻量实时滤波。
+    void ApplyMicFilter(short* samples, unsigned int frames);
 
 private:
     C_Listener*       m_pListener;
@@ -78,4 +89,19 @@ private:
     // 本地拉回后可以直接 ffplay 听效果，用于验证 ALSA 采集 + AAC 编码质量
     FILE*             m_pDumpFile      = nullptr;
     void WriteAdtsAndDump(const unsigned char* aac, unsigned int aacLen);
+
+    // 原始麦克风 PCM dump：若环境变量 MIC_PCM_DUMP_PATH 被设置，则把 ALSA 刚采集到
+    // 的 S16_LE/mono/48kHz 数据写成 WAV，便于离线频谱分析电流声/底噪。
+    FILE*             m_pPcmDumpFile   = nullptr;
+    uint32_t          m_pcmDumpBytes   = 0;
+    uint32_t          m_pcmDumpMaxBytes = 0;
+    void InitPcmDump();
+    void WritePcmDump(const short* samples, unsigned int frames);
+    void ClosePcmDump();
+
+    Biquad            m_filterChain[16];
+    int               m_filterCount = 0;
+    int               m_filterMode  = -1;
+    double            m_gateGain    = 1.0;
+    void RebuildMicFilter(int mode);
 };

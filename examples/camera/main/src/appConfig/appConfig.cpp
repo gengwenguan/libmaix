@@ -123,6 +123,7 @@ std::string C_AppConfig::ToJson(const Snapshot& s)
        << ",\"record_max_bytes\":" << s.record_max_bytes
        << ",\"album_max_photos\":" << s.album_max_photos
        << ",\"photo_jpeg_qual\":"  << s.photo_jpeg_qual
+       << ",\"mic_filter_mode\":"  << s.mic_filter_mode
        << ",\"vmd_enabled\":"        << (s.vmd_enabled ? "true" : "false")
        << ",\"vmd_pixel_thresh\":"   << s.vmd_pixel_thresh
        << ",\"vmd_area_ratio\":"     << s.vmd_area_ratio
@@ -146,6 +147,7 @@ bool C_AppConfig::AssignKv(Snapshot& s, const std::string& k, const std::string&
     else if (k == "record_max_bytes")   s.record_max_bytes  = StrToU64(v,  s.record_max_bytes);
     else if (k == "album_max_photos")   s.album_max_photos  = StrToInt(v,  s.album_max_photos);
     else if (k == "photo_jpeg_qual")    s.photo_jpeg_qual   = StrToInt(v,  s.photo_jpeg_qual);
+    else if (k == "mic_filter_mode")    s.mic_filter_mode   = StrToInt(v,  s.mic_filter_mode);
     else if (k == "vmd_enabled")        s.vmd_enabled       = StrToBool(v, s.vmd_enabled);
     else if (k == "vmd_pixel_thresh")   s.vmd_pixel_thresh  = StrToInt(v,  s.vmd_pixel_thresh);
     else if (k == "vmd_area_ratio")     s.vmd_area_ratio    = StrToFloat(v,s.vmd_area_ratio);
@@ -170,6 +172,7 @@ void C_AppConfig::ClampSnapshot(Snapshot& s)
                                            512ull * 1024 * 1024 * 1024); // 上限 512GB
     s.album_max_photos   = Clamp(s.album_max_photos,  10,     100000);
     s.photo_jpeg_qual    = Clamp(s.photo_jpeg_qual,   30,     100);
+    s.mic_filter_mode    = Clamp(s.mic_filter_mode,   0,      5);
     s.vmd_pixel_thresh   = Clamp(s.vmd_pixel_thresh,  1,      255);
     s.vmd_area_ratio     = Clamp(s.vmd_area_ratio,    0.001f, 0.5f);
     s.vmd_min_interval_s = Clamp(s.vmd_min_interval_s,1,      3600);
@@ -215,6 +218,7 @@ bool C_AppConfig::SaveToFile_locked() const
         << "  \"record_max_bytes\":   " << m_snap.record_max_bytes << ",\n"
         << "  \"album_max_photos\":   " << m_snap.album_max_photos << ",\n"
         << "  \"photo_jpeg_qual\":    " << m_snap.photo_jpeg_qual << ",\n"
+        << "  \"mic_filter_mode\":    " << m_snap.mic_filter_mode << ",\n"
         << "  \"vmd_enabled\":        " << (m_snap.vmd_enabled ? "true" : "false") << ",\n"
         << "  \"vmd_pixel_thresh\":   " << m_snap.vmd_pixel_thresh << ",\n"
         << "  \"vmd_area_ratio\":     " << m_snap.vmd_area_ratio << ",\n"

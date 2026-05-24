@@ -53,6 +53,10 @@ public:
         int    album_max_photos = 1000;     // 超出按 mtime 删最老
         int    photo_jpeg_qual  = 88;       // JPEG 编码质量（50~95）
 
+        // ---- 麦克风滤波 ----
+        // 0=关闭；1=均衡推荐；2=激进；3=精细；4=极激进；5=均衡+噪声门
+        int    mic_filter_mode = 0;
+
         // ---- 移动侦测（VMD：与 AI 检测平行的轻量级触发器）----
         // 原理：把 NV21 的 Y 平面下采样到 80×60，与上一参考帧做差，
         //       diff > pixel_thresh 的像素数占比超过 area_ratio 即判定"有移动"。
