@@ -67,3 +67,4 @@ components/libmaix/lib/arch/r329/aarch64-linux-gnu/
 
 .cache/
 target/
+.DS_Store
