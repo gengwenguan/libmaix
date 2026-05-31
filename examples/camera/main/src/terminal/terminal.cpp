@@ -18,6 +18,47 @@
 #include "liveHub.h"
 #include "appConfig.h"
 
+// ----------------------------------------------------------------------
+// 给 raw AAC 加 ADTS 头（7 字节，无 CRC）：浏览器侧 Web Audio API 在
+// decodeAudioData 时只识别带容器的 AAC（ADTS / mp4）；纯 raw AAC 无法解。
+// 这里复用 aacEnc.cpp 内部 dump 路径相同的算法，但单独提一份避免循环依赖。
+// ----------------------------------------------------------------------
+namespace {
+inline int AscFreqIndex(int sampleRate)
+{
+    static const int kFreqTable[] = {
+        96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050,
+        16000, 12000, 11025, 8000,  7350,  0,     0,     0
+    };
+    for (int i = 0; i < 13; ++i) {
+        if (kFreqTable[i] == sampleRate) return i;
+    }
+    return 3;  // 默认 48000Hz
+}
+
+// 把 raw AAC 加上 ADTS 头放进 outBuf；outBuf 长度 = 7 + aacLen
+void BuildAdtsFrame(const unsigned char* aac, unsigned int aacLen,
+                    int sampleRate, int channels,
+                    std::vector<unsigned char>& outBuf)
+{
+    const int profile = 1;            // AAC-LC = aot 2 - 1
+    const int chCfg   = channels;
+    const int freqIdx = AscFreqIndex(sampleRate);
+    const unsigned int frameLen = 7 + aacLen;
+
+    outBuf.resize(frameLen);
+    unsigned char* p = outBuf.data();
+    p[0] = 0xFF;
+    p[1] = 0xF1;                                            // MPEG-4 + protection_absent
+    p[2] = (profile << 6) | (freqIdx << 2) | (chCfg >> 2);
+    p[3] = ((chCfg & 3) << 6) | ((frameLen >> 11) & 0x03);
+    p[4] = (frameLen >> 3) & 0xFF;
+    p[5] = ((frameLen & 0x07) << 5) | 0x1F;
+    p[6] = 0xFC;
+    memcpy(p + 7, aac, aacLen);
+}
+} // namespace
+
 
 C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight, libmaix_cam_t* aiCam)
     :m_Wight(Wight),
@@ -54,8 +95,11 @@ C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight, libmaix_cam_t* ai
     }
     m_recordDir   = exeDir + "/record";
     m_snapshotDir = exeDir + "/snapshot";
+    m_promptDir   = exeDir + "/prompt";
     mkdir(m_recordDir.c_str(),   0755);
     mkdir(m_snapshotDir.c_str(), 0755);
+    // m_promptDir 由 CMake 在 dist/prompt/ 下生成 wav；运行时不创建，
+    // 缺失时 PlayWavSync 会按 -1（文件不存在）处理。
     CLOG_INF("录像目录: %s\n", m_recordDir.c_str());
     CLOG_INF("拍照目录: %s\n", m_snapshotDir.c_str());
 
@@ -225,7 +269,18 @@ int C_Terminal::OnOutputH264(unsigned char* data, unsigned int dataLen,
 //音频编码回调的aac数据
 int C_Terminal::OnOutputAac(unsigned char* data, unsigned int dataLen, int64_t ptsUs)
 {
-    // muxer 还没建好（首个 IDR 还没出来）就先丢弃，避免无视频时单独出音频
+    // ---- 纯音频直播路径（/ws/audio）----
+    // 不依赖 muxer / 视频是否就绪，只要 AAC 出帧就把 ADTS 帧广播出去。
+    // 这样浏览器端"仅音频模式"在没有 H264 IDR 之前也能立即出声。
+    if (m_pWsServer) {
+        const int sr = (int)m_pAacEnc->SampleRate();
+        const int ch = (int)m_pAacEnc->Channels();
+        std::vector<unsigned char> adts;
+        BuildAdtsFrame(data, dataLen, sr, ch, adts);
+        m_pWsServer->BroadcastAudioBinary(adts.data(), adts.size());
+    }
+
+    // muxer 还没建好（首个 IDR 还没出来）就先丢弃 fmp4 路径，避免无视频时单独出音频
     if (!m_pMuxer) return 0;
 
     m_pMuxer->InputAac(data, dataLen, ptsUs);
@@ -636,6 +691,7 @@ void C_Terminal::RegisterHttpApis()
     // 拍照 API（独立目录 snapshot/，仅手动触发，不自动清理）
     //
     //   POST /api/snapshot                 -> {ok, name, size}
+    //   GET  /api/photo/latest             -> {ok, name, size, mtime}
     //   GET  /api/photo/list               -> [{name, size, mtime}, ...]  (倒序)
     //   POST /api/photo/delete   body: {"names":["xxx.jpg",...]}
     //                                      -> {ok, deleted, missing, errors:[...]}
@@ -658,6 +714,133 @@ void C_Terminal::RegisterHttpApis()
             std::ostringstream js;
             js << "{\"ok\":true,\"name\":\"" << JsonEscape(name)
                << "\",\"size\":" << sz << "}";
+            rsp.body = js.str();
+            return rsp;
+        });
+
+    // POST /api/prompt   body: {"name":"door"}
+    // 同步播放 <exeDir>/prompt/<name>.wav，要求 16-bit / 48kHz / mono PCM。
+    // 返回：
+    //   200 {"ok":true, "name":"door", "duration_ms":1410}
+    //   400 {"ok":false,"err":"missing name"} / {"ok":false,"err":"bad name"}
+    //   404 {"ok":false,"err":"not found"}
+    //   409 {"ok":false,"err":"busy"}                     另一个提示音正在播
+    //   500 {"ok":false,"err":"play failed"}              ALSA 失败 / wav 格式不符
+    http->RegisterApi("POST", "/api/prompt",
+        [this](const C_HttpServer::ApiRequest& req) -> C_HttpServer::ApiResponse {
+            C_HttpServer::ApiResponse rsp;
+            rsp.contentType = "application/json";
+
+            // 极简 json：抽 "name":"xxx"。和 /api/photo/delete 的写法保持一致。
+            std::string name;
+            const std::string& body = req.body;
+            size_t kp = body.find("\"name\"");
+            if (kp != std::string::npos) {
+                size_t colon = body.find(':', kp);
+                if (colon != std::string::npos) {
+                    size_t q1 = body.find('"', colon + 1);
+                    size_t q2 = (q1 == std::string::npos)
+                                  ? std::string::npos : body.find('"', q1 + 1);
+                    if (q1 != std::string::npos && q2 != std::string::npos) {
+                        name = body.substr(q1 + 1, q2 - q1 - 1);
+                    }
+                }
+            }
+            if (name.empty()) {
+                rsp.status = 400;
+                rsp.body = "{\"ok\":false,\"err\":\"missing name\"}";
+                return rsp;
+            }
+            // 白名单：和 IsSafeFileName 等价，但禁止 '.' 出现在 name 自身（避免传入 "../foo"
+            // 或 "foo.wav"），由后端固定拼 .wav 扩展名。
+            for (char c : name) {
+                bool ok = (c>='A'&&c<='Z')||(c>='a'&&c<='z')||
+                          (c>='0'&&c<='9')||c=='_'||c=='-';
+                if (!ok) {
+                    rsp.status = 400;
+                    rsp.body = "{\"ok\":false,\"err\":\"bad name\"}";
+                    return rsp;
+                }
+            }
+
+            std::string full = m_promptDir + "/" + name + ".wav";
+            struct stat st{};
+            if (stat(full.c_str(), &st) != 0) {
+                rsp.status = 404;
+                rsp.body = "{\"ok\":false,\"err\":\"not found\"}";
+                return rsp;
+            }
+            // door.wav 标准 wav 头：data 子块 = file_size - dataOff；
+            // 这里粗略按 (size - 44) / 2 / 48 估时长（毫秒），仅用于前端 UI 反馈，
+            // 误差几十毫秒不影响体验。
+            uint64_t durMs = (st.st_size > 44)
+                ? (uint64_t)((st.st_size - 44) / 2 / 48)
+                : 0;
+
+            if (!m_pTalkPlayer) {
+                rsp.status = 500;
+                rsp.body = "{\"ok\":false,\"err\":\"player not ready\"}";
+                return rsp;
+            }
+            int rc = m_pTalkPlayer->PlayWavSync(full);
+            if (rc == -3) {
+                rsp.status = 409;
+                rsp.body = "{\"ok\":false,\"err\":\"busy\"}";
+                return rsp;
+            }
+            if (rc != 0) {
+                rsp.status = 500;
+                rsp.body = "{\"ok\":false,\"err\":\"play failed\"}";
+                return rsp;
+            }
+            std::ostringstream js;
+            js << "{\"ok\":true,\"name\":\"" << JsonEscape(name)
+               << "\",\"duration_ms\":" << durMs << "}";
+            rsp.body = js.str();
+            return rsp;
+        });
+
+    // GET /api/photo/latest
+    http->RegisterApi("GET", "/api/photo/latest",
+        [this](const C_HttpServer::ApiRequest&) -> C_HttpServer::ApiResponse {
+            C_HttpServer::ApiResponse rsp;
+            std::string bestName;
+            uint64_t bestSize = 0;
+            int64_t bestMtime = 0;
+
+            DIR* d = opendir(m_snapshotDir.c_str());
+            if (d) {
+                struct dirent* e = nullptr;
+                while ((e = readdir(d)) != nullptr) {
+                    std::string n(e->d_name);
+                    if (n.size() < 5) continue;
+                    if (n.compare(n.size() - 4, 4, ".jpg") != 0) continue;
+                    if (!IsSafeFileName(n)) continue;
+                    if (!bestName.empty() && n <= bestName) continue;
+
+                    std::string full = m_snapshotDir + "/" + n;
+                    struct stat st{};
+                    if (stat(full.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+                        bestName = n;
+                        bestSize = (uint64_t)st.st_size;
+                        bestMtime = (int64_t)st.st_mtime;
+                    }
+                }
+                closedir(d);
+            }
+
+            rsp.contentType = "application/json";
+            if (bestName.empty()) {
+                rsp.status = 404;
+                rsp.body = "{\"ok\":false,\"err\":\"no photo\"}";
+                return rsp;
+            }
+
+            std::ostringstream js;
+            js << "{\"ok\":true,\"name\":\"" << JsonEscape(bestName)
+               << "\",\"size\":" << bestSize
+               << ",\"mtime\":" << bestMtime
+               << "}";
             rsp.body = js.str();
             return rsp;
         });

@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Camera 监控系统</title>
+    <link rel="icon" href="/favicon.ico?v=20260525" sizes="any">
     <style>
         :root {
             --bg-grad-1:#1e3c72; --bg-grad-2:#2a5298;
@@ -183,6 +184,7 @@
                 <button id="btnStop">⏹ 停止</button>
                 <button id="btnUnmute">🔇 取消静音</button>
                 <button id="btnSnap">📷 拍照</button>
+                <button id="btnDoor" title="让开发板播放“放门口”提示音">🔔 放门口</button>
                 <button id="btnTalk" style="display:none;">🎤 讲话</button>
                 <span class="stat" id="stat">未连接</span>
                 <span style="flex:1"></span>
@@ -668,6 +670,37 @@
             snapTip.textContent = '❌ 拍照异常：' + e.message;
         }
         btnSnap.disabled = false;
+    };
+
+    // 放门口提示音：调 POST /api/prompt {name:'door'}
+    // 服务端同步阻塞约 1.4 秒（door.wav 时长）；并发调用返回 409 busy。
+    // 提示音通过 C_TalkPlayer 共享 ALSA：talk 在线时与之串行；不在线时临时打开声卡。
+    const btnDoor = document.getElementById('btnDoor');
+    btnDoor.onclick = async () => {
+        if (btnDoor.disabled) return;
+        const orig = btnDoor.textContent;
+        btnDoor.disabled = true;
+        btnDoor.textContent = '🔔 播放中…';
+        snapTip.textContent = '正在播放提示音「放门口」…';
+        let r;
+        try {
+            r = await api('POST', '/api/prompt', { name: 'door' });
+            if (r.ok && r.data && r.data.ok) {
+                snapTip.textContent = '✅ 已播放提示音「放门口」'
+                    + (r.data.duration_ms ? ` (${r.data.duration_ms}ms)` : '');
+            } else if (r.status === 409) {
+                snapTip.textContent = '⚠️ 提示音正在播放，稍后再试';
+            } else if (r.status === 404) {
+                snapTip.textContent = '❌ 提示音文件未部署：检查 dist/prompt/door.wav';
+            } else {
+                snapTip.textContent = '❌ 提示音失败：'
+                    + ((r.data && r.data.err) || ('HTTP ' + r.status));
+            }
+        } catch (e) {
+            snapTip.textContent = '❌ 提示音异常：' + e.message;
+        }
+        btnDoor.textContent = orig;
+        btnDoor.disabled = false;
     };
 
     // 录像状态轮询（只读，没有 start/stop 按钮）

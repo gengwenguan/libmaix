@@ -42,14 +42,17 @@ project(${PROJECT_NAME})
 # 拷贝前端资源到 dist/web/
 # 约定：
 #   examples/camera/web_player.html  →  dist/web/index.html
+#   examples/camera/favicon.ico      →  dist/web/favicon.ico
 #   将来要拆 app.js / style.css，往 examples/camera/web/ 下放即可
 #   （如果以后 web/ 目录存在，会整目录复制；目前只有单文件，先按文件复制）
 # 设备端运行时由 httpServer 通过 /proc/self/exe 解析自身目录、
 # 读取 <exe_dir>/web/index.html。
 # ----------------------------------------------------------------------
 set(_web_src_html "${CMAKE_CURRENT_LIST_DIR}/web_player.html")
+set(_web_src_favicon "${CMAKE_CURRENT_LIST_DIR}/favicon.ico")
 set(_web_dst_dir  "${PROJECT_DIST_DIR}/web")
 set(_web_dst_html "${_web_dst_dir}/index.html")
+set(_web_dst_favicon "${_web_dst_dir}/favicon.ico")
 if(EXISTS "${_web_src_html}")
     # 旧实现用 add_custom_command(TARGET ... POST_BUILD)，
     # 只在 camera 目标真正链接时才触发。当只改 web_player.html 而 C++ 源没变时，
@@ -57,15 +60,46 @@ if(EXISTS "${_web_src_html}")
     # 改为独立 custom_command + custom_target，让它依赖源 html，
     # 源文件 mtime 一变 → dist 文件被重生成，且 ALL 模式确保每次 build 都检查。
     add_custom_command(
-        OUTPUT  "${_web_dst_html}"
+        OUTPUT  "${_web_dst_html}" "${_web_dst_favicon}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${_web_dst_dir}"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${_web_src_html}" "${_web_dst_html}"
-        DEPENDS "${_web_src_html}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_web_src_favicon}" "${_web_dst_favicon}"
+        DEPENDS "${_web_src_html}" "${_web_src_favicon}"
         COMMENT "-- copy web assets to ${_web_dst_html}"
     )
-    add_custom_target(copy_web_assets ALL DEPENDS "${_web_dst_html}")
+    add_custom_target(copy_web_assets ALL DEPENDS "${_web_dst_html}" "${_web_dst_favicon}")
     add_dependencies(${PROJECT_NAME} copy_web_assets)
+endif()
+
+# ----------------------------------------------------------------------
+# 拷贝提示音资源到 dist/prompt/
+# 约定：
+#   examples/camera/door.wav     →  dist/prompt/door.wav
+#   examples/camera/*.wav        →  dist/prompt/*.wav    （未来新增）
+# 设备端运行时由 C_TalkPlayer::PlayWavSync 通过 <exe_dir>/prompt/<name>.wav 加载。
+# 第一版只支持 16-bit / 48kHz / mono PCM（与 ALSA 输出参数完全一致），
+# 不需要重采样；新加 wav 文件请先用 ffmpeg/sox 转成同样参数。
+# ----------------------------------------------------------------------
+file(GLOB _prompt_src_wavs "${CMAKE_CURRENT_LIST_DIR}/*.wav")
+if(_prompt_src_wavs)
+    set(_prompt_dst_dir "${PROJECT_DIST_DIR}/prompt")
+    set(_prompt_dst_wavs)
+    foreach(_src_wav ${_prompt_src_wavs})
+        get_filename_component(_wav_name "${_src_wav}" NAME)
+        set(_dst_wav "${_prompt_dst_dir}/${_wav_name}")
+        list(APPEND _prompt_dst_wavs "${_dst_wav}")
+        add_custom_command(
+            OUTPUT  "${_dst_wav}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${_prompt_dst_dir}"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_src_wav}" "${_dst_wav}"
+            DEPENDS "${_src_wav}"
+            COMMENT "-- copy prompt wav to ${_dst_wav}"
+        )
+    endforeach()
+    add_custom_target(copy_prompt_assets ALL DEPENDS ${_prompt_dst_wavs})
+    add_dependencies(${PROJECT_NAME} copy_prompt_assets)
 endif()
 
 # ----------------------------------------------------------------------
@@ -100,5 +134,4 @@ if(EXISTS "${_cert_src_dir}/server.crt" AND EXISTS "${_cert_src_dir}/server.key"
 else()
     message(WARNING "TLS cert not found at ${_cert_src_dir}; HTTPS will fail at runtime")
 endif()
-
 

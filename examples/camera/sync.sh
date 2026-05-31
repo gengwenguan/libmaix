@@ -61,6 +61,7 @@ do_sync() {
         --exclude='core' \
         --exclude='core.*' \
         --exclude='video/' \
+        --exclude='.DS_Store' \
         -e "ssh -o StrictHostKeyChecking=no" \
         "${LOCAL_DIR}/" "${BUILD_USER}@${BUILD_HOST}:${BUILD_DIR}/"
     log "源码同步完成"

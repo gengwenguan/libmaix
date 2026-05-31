@@ -69,9 +69,10 @@ camera/
 | HTTP  | 8080 | 静态资源（`web/index.html`）+ REST API + 录像/相册下载 |
 | HTTPS | 8443 | 同上，TLS（自签名证书） |
 | WS  (`/ws/live`) | 8081 | fMP4 直播推流（init segment + 持续 fragment） |
+| WS  (`/ws/audio`) | 8081 | **纯音频直播**（ADTS AAC 帧，省带宽） |
 | WS  (`/ws/talk`) | 8081 | 浏览器→板子 OPUS 二进制对讲帧 |
 | WS  (`/ws/playback`) | 8082 | 旧版回放协议（保留兼容） |
-| WSS | 8444 / 8445 | live / playback 的 TLS 镜像 |
+| WSS | 8444 / 8445 | live(含 `/ws/audio`) / playback 的 TLS 镜像 |
 
 > HTTPS 仅在 `<exeDir>/cert/server.crt`、`server.key` 都存在时启用；
 > 不存在时自动降级为明文，但前端对讲按钮在 `http://` 下会因浏览器的麦克权限策略隐藏。
@@ -140,9 +141,11 @@ PersonDetector 只"使用"该 cam，不 own，main 负责 destroy。
 | GET | `/api/record/segments?date=YYYYMMDD` | 当天分片 `[{name,size,hms,sec}]` |
 | GET | `/record/<YYYYMMDD>/<name>.mp4` | **流式下载/inline 播放，支持 `Range` / 206** |
 | GET | `/record/<YYYYMMDD>/<name>.mp4.idx` | **精准跳转伴生索引（JSON，几 KB）**：列出 init 段大小 + 每个 fragment 的 byte offset / size / tfdt，前端按需拉取目标 fragment 字节区间 |
+| GET | `/api/photo/latest`    | 获取最新一张抓拍照片元信息 |
 | GET | `/api/photo/list`      | 抓拍相册列表 |
 | GET | `/photo/<name>.jpg`    | 单张抓拍下载 |
 | POST| `/api/snapshot`        | 立即拍一张 |
+| POST| `/api/prompt`          | body `{name:"door"}`：同步播放 `<exeDir>/prompt/<name>.wav`（详见 §5.3） |
 | GET | `/api/config`          | 当前 AppConfig snapshot（JSON） |
 | POST| `/api/config` (form/json) | 局部更新 + 落盘；下个决策点（每帧 / 每片 / 每次扫描）即时生效 |
 
@@ -205,6 +208,129 @@ seek 行为）。前端额外监听 `video.seeking` 事件，发现目标缺字�
 
 > 旧版"整文件下载、客户端自己 demux"仍然兼容（无 `.idx` 时前端走老分支），
 > 这也是为什么改造可以平滑铺设到既存录像目录上。
+
+### 5.2 仅音频直播：`/ws/audio`（省带宽方案）
+
+完整 fMP4 直播在 30FPS / VBR 5Mbps 下的实际下行约 **1~2 Mbps**。
+当用户只想"听"现场（例如锁屏后台监听、车载弱网、流量计费场景）时，
+完全没必要把视频字节也拉下来。为此服务端额外暴露一条独立的 WebSocket
+路径 `/ws/audio`，**只推 AAC 音频**，下行带宽降到 **~64 kbps（AAC 码率本身）**。
+
+#### 服务端链路
+
+- 复用同一个 `C_WebSocketServer`（端口 8081 / 8444），不新增端口。
+- 路径派发：[websocketServer.cpp](file:///Users/bytedance/work/libmaix/examples/camera/main/src/websocketServer/websocketServer.cpp)
+  - `BroadcastBinary`（fmp4 视频路径）**跳过** `urlPath == "/ws/audio"` 的客户端
+  - 新增 [`BroadcastAudioBinary`](file:///Users/bytedance/work/libmaix/examples/camera/main/src/websocketServer/websocketServer.cpp)：**只**向 `/ws/audio` 客户端发包
+  - 握手成功时：`/ws/audio` 客户端**不下发** fmp4 init segment（拿到也没用）
+- 帧来源：[terminal.cpp::OnOutputAac](file:///Users/bytedance/work/libmaix/examples/camera/main/src/terminal/terminal.cpp)
+  在每帧 raw AAC 出来后，先用 `BuildAdtsFrame` 加 7 字节 ADTS 头，再调
+  `m_pWsServer->BroadcastAudioBinary(...)`。
+  - 这条路径**不依赖 muxer / 是否拿到首个 IDR**——只要 `aacEnc` 出帧就立即广播。
+    所以浏览器端"仅音频模式"在视频通路尚未就绪时也能听到声音。
+  - ADTS 头各字段从 `m_pAacEnc->SampleRate() / Channels()` 现取，与 `aacEnc` 内部
+    的 dump 路径完全一致。
+
+#### 浏览器端
+
+[web_player.html](file:///Users/bytedance/work/libmaix/examples/camera/web_player.html) 顶栏新增 `🎧 仅音频` 按钮：
+
+- 点击后 `stopLive()` 释放 fmp4 / MSE，再连 `ws(s)://host:8081|8444/ws/audio`
+- 接到二进制帧后用 `AudioContext.decodeAudioData` 直接解 ADTS（Chrome / Edge / Firefox / Safari 原生支持）
+- 用单调递增的 `audioPlayHead` 调度 `BufferSource.start(t)`，落后超 1.2s 自动追到 `now+50ms`
+- 背压保护：同时排队 decode > 12 帧（约 256ms × 12）就丢一帧，避免 GC 抖动
+- Safari/iOS：必须用户手势触发 `audioCtx.resume()`，因此固定走 `btnAudioOnly.onclick`
+
+#### 与视频直播 / 对讲的关系
+
+| 维度 | `/ws/live` (fmp4) | `/ws/audio` (ADTS AAC) |
+|---|---|---|
+| 下行带宽 | ~1-2 Mbps | ~64 kbps |
+| 解码栈 | MSE + `<video>` | Web Audio API |
+| 起播延迟 | 等首个 IDR | 立即（ALSA 出帧即广播） |
+| 互斥 | 与 `/ws/audio` 互斥 | 进入仅音频时自动 `stopLive()` |
+| 入流 | `Recorder + LiveHub.OnLiveFragment` | `BroadcastAudioBinary` 旁路 |
+
+> **单一编码源**：板上始终只跑一份 H264 + 一份 AAC 编码，无论几个客户端订阅
+> 视频/音频流——这一点和视频直播保持一致，64MB 板子才扛得住。
+
+
+---
+
+### 5.3 板上提示音播放：`POST /api/prompt`
+
+需求场景：web 端点一下"放门口"按钮，开发板扬声器立即播一段固定提示音
+（典型用途：外卖配送提示、欢迎语、告警语）。
+
+#### 链路
+
+```
+[Web 端] 🔔 放门口 button
+    │  POST /api/prompt   body: {"name":"door"}
+    ▼
+[HTTP 工作线程] terminal.cpp ──校验白名单(name 仅 [A-Za-z0-9_-])
+    │                     ──拼路径 <exeDir>/prompt/<name>.wav
+    │                     ──stat 文件存在 → 估算 duration_ms
+    ▼
+[C_TalkPlayer::PlayWavSync(path)] talkPlayer.cpp
+    │  1. m_promptBusy CAS true     （重叠请求 → -3 → HTTP 409 busy）
+    │  2. 一次性读 wav 入内存（≤8MB 上限）
+    │  3. 解析 RIFF/WAVE：要求 PCM/48kHz/16bit/mono（其它格式 → -1 → HTTP 500）
+    │  4. 若 m_pcm 未打开（没有 talk 客户端在线）→ EnsureAlsa_locked
+    │  5. AlsaWrite 写 data 子块（受 m_pcmMtx 保护，与 talk 解码线程串行）
+    │  6. snd_pcm_drain 等待播完
+    │  7. 临时打开的 m_pcm 在播完后归还（前提：talk 仍未上线）
+    ▼
+[ALSA default] V831 内置扬声器
+```
+
+#### 资源管理（与对讲共存）
+
+ALSA `default` 设备在 V831 上**独占**，整个工程对它只允许一条打开路径。
+做法：
+
+- **TalkPlayer 既管对讲、也管提示音**：第一个 `/ws/talk` 连入打开 ALSA，最后一个
+  断开时按需释放；提示音播放复用同一 `m_pcm`。
+- **m_pcmMtx 序列化两路写入**：talk 解码线程和 prompt 同步路径都在 period 粒度
+  交替提交，等价于"先到先服务"的简易 mixer。
+- **m_promptBusy CAS 守护并发**：同时只允许一段提示音在播，重叠请求直接 409
+  避免噪声叠加 / underrun。
+- **Shutdown 在 prompt 进行时跳过 close**：talk 客户端最后一个断开时若
+  `m_promptBusy==true`，保留 m_pcm 让提示音播完，由 PlayWavSync 末尾收尾。
+
+#### wav 文件部署
+
+```
+examples/camera/door.wav         ← 源文件（已纳入 git）
+       │
+       │  CMake copy_prompt_assets target  (file(GLOB) 整目录扫，新增 wav 不必改 CMake)
+       ▼
+dist/camera/prompt/door.wav      ← buildpush.sh 推到板子
+       │
+       ▼
+/root/maix_dist/prompt/door.wav  ← C_TalkPlayer::PlayWavSync 加载
+```
+
+**格式约束（第一版严格校验）**：必须是 `PCM(format=1) / 48000Hz / 16-bit / 1ch`。
+不匹配返回 -1 / HTTP 500。新增提示音时，先用 ffmpeg 转码：
+
+```bash
+ffmpeg -i in.wav -ar 48000 -ac 1 -sample_fmt s16 examples/camera/welcome.wav
+```
+
+后端代码无需任何改动，新文件随 buildpush.sh 一起部署即可，前端通过
+`POST /api/prompt {name:"welcome"}` 触发（注意：前端按钮目前只硬编码了
+"door"，添加新提示音时需要在 web_player.html 里加一个对应按钮）。
+
+#### HTTP 响应码
+
+| 状态 | body | 触发条件 |
+|---|---|---|
+| 200 | `{ok:true, name, duration_ms}` | 正常播放完成 |
+| 400 | `{ok:false, err:"missing name"}` 或 `bad name` | 字段缺失 / 包含非白名单字符 |
+| 404 | `{ok:false, err:"not found"}` | wav 文件不存在 |
+| 409 | `{ok:false, err:"busy"}` | 另一段提示音正在播 |
+| 500 | `{ok:false, err:"play failed"}` | wav 格式不符 / ALSA 错误 |
 
 ---
 
@@ -367,4 +493,3 @@ Mac (你)                ──rsync──>  192.168.1.10 (编译机)         �
 - **OpenCV**：OSD 文字 / JPEG 编码（已由 libmaix 引入）
 - **ALSA**：麦克风采集 + 对讲扬声器播放
 - **awnn**：V831 NPU 推理后端（YOLOv2 person_int8）
-

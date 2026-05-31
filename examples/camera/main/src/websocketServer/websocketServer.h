@@ -84,6 +84,10 @@ public:
     // 发送二进制数据给指定客户端（fMP4 字节直接通过 WS binary 帧）
     int SendBinary(int fd, unsigned char* pData, unsigned int nLen);
 
+    // 仅向 /ws/audio 客户端广播二进制（用于 ADTS AAC 纯音频流）。
+    // 与默认 LiveHub 广播路径互不影响：默认路径会跳过 /ws/audio 客户端。
+    void BroadcastAudioBinary(const uint8_t* data, size_t len);
+
     // 获取当前连接数
     int GetClientCount();
 

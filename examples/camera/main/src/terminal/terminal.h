@@ -108,6 +108,9 @@ private:
     std::unique_ptr<C_Snapshot>        m_pSnapshot;
     std::string                        m_snapshotDir;
 
+    // 提示音（白名单 wav，统一放在 <exeDir>/prompt/ 下）
+    std::string                        m_promptDir;
+
     // 人形识别（自动拍照触发；模型路径与配置由 AppConfig 控制）
     std::unique_ptr<C_PersonDetector>  m_pPersonDetector;
 

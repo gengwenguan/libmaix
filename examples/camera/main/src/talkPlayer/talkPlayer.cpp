@@ -5,10 +5,15 @@
   *Date:      2026-05-23
   *Description:  讲话回放：OPUS(浏览器 AudioEncoder) → ALSA(开发板扬声器)
                  ALSA 部分参数与 main.cpp#L163-272 完全一致：48kHz / S16_LE / 1ch
+                 同时承担提示音 PlayWavSync(...) 的 ALSA 复用，避免对 /dev/snd
+                 的多路独占开关。
 **********************************************************************************/
 #include "talkPlayer.h"
 #include "logAdapt.h"
 #include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <vector>
 
 #define PRINT_FFMPEG_ERR(errnum) do { \
     char errbuf[AV_ERROR_MAX_STRING_SIZE]; \
@@ -30,22 +35,14 @@ C_TalkPlayer::~C_TalkPlayer()
     Shutdown();
 }
 
-bool C_TalkPlayer::InitDevice()
+bool C_TalkPlayer::EnsureAlsa_locked()
 {
-    std::lock_guard<std::mutex> lk(m_initMtx);
+    if (m_pcm) return true;  // 已打开，幂等
 
-    // 已经 Init 过：幂等返回成功（多个 /ws/talk 客户端同时连入也只 Init 一次）
-    if (m_run.load()) {
-        CLOG_INF("TalkPlayer InitDevice: already running, skip\n");
-        return true;
-    }
-
-    // 1) ALSA 播放设备（与 main.cpp 测试代码相同参数）
     int err = snd_pcm_open(&m_pcm, "default", SND_PCM_STREAM_PLAYBACK, 0);
     if (err < 0) {
         CLOG_ERR("TalkPlayer snd_pcm_open: %s\n", snd_strerror(err));
         m_pcm = nullptr;
-        Shutdown_locked();
         return false;
     }
 
@@ -66,10 +63,39 @@ bool C_TalkPlayer::InitDevice()
     snd_pcm_hw_params_free(params);
     if (err < 0) {
         CLOG_ERR("TalkPlayer snd_pcm_hw_params: %s\n", snd_strerror(err));
-        Shutdown_locked();
+        snd_pcm_close(m_pcm);
+        m_pcm = nullptr;
         return false;
     }
     snd_pcm_prepare(m_pcm);
+    return true;
+}
+
+void C_TalkPlayer::CloseAlsa_locked()
+{
+    if (m_pcm) {
+        snd_pcm_drop(m_pcm);
+        snd_pcm_close(m_pcm);
+        m_pcm = nullptr;
+    }
+}
+
+bool C_TalkPlayer::InitDevice()
+{
+    std::lock_guard<std::mutex> lk(m_initMtx);
+
+    // 已经 Init 过：幂等返回成功（多个 /ws/talk 客户端同时连入也只 Init 一次）
+    if (m_run.load()) {
+        CLOG_INF("TalkPlayer InitDevice: already running, skip\n");
+        return true;
+    }
+
+    // 1) ALSA 播放设备（与 main.cpp 测试代码相同参数）
+    //    若 PlayWavSync 已经临时打开过 m_pcm，这里幂等复用。
+    if (!EnsureAlsa_locked()) {
+        Shutdown_locked();
+        return false;
+    }
 
     // 2) FFmpeg OPUS 解码器
     AVCodec* codec = avcodec_find_decoder(AV_CODEC_ID_OPUS);
@@ -144,17 +170,18 @@ void C_TalkPlayer::Shutdown_locked()
         m_queue.clear();
     }
 
-    // 3) 释放 FFmpeg / Swr / ALSA
+    // 3) 释放 FFmpeg / Swr
     if (m_swr)    { swr_free(&m_swr); }
     if (m_decCtx) { avcodec_free_context(&m_decCtx); }
-    if (m_pcm)    {
-        // 注意：drain 会阻塞直到 ALSA buffer 放完；这里直接 drop 抛弃残留 PCM，
-        // 因为客户端已经断开，没必要再播放上一次的尾音
-        snd_pcm_drop(m_pcm);
-        snd_pcm_close(m_pcm);
-        m_pcm = nullptr;
+
+    // 4) ALSA：若有提示音正在播，保留 m_pcm 让它播完，由 PlayWavSync 收尾时关闭。
+    //    否则直接释放，让出独占的 /dev/snd。
+    if (m_promptBusy.load()) {
+        CLOG_INF("TalkPlayer Shutdown: prompt 正在播放，保留 m_pcm 由 prompt 收尾\n");
+    } else {
+        CloseAlsa_locked();
+        CLOG_INF("TalkPlayer Shutdown 完成（声卡已释放）\n");
     }
-    CLOG_INF("TalkPlayer Shutdown 完成（声卡已释放）\n");
 }
 
 int C_TalkPlayer::FeedOpus(const unsigned char* data, unsigned int dataLen)
@@ -181,11 +208,20 @@ void C_TalkPlayer::Reset()
         m_queue.clear();
     }
     if (m_decCtx) avcodec_flush_buffers(m_decCtx);
-    if (m_pcm)    { snd_pcm_drop(m_pcm); snd_pcm_prepare(m_pcm); }
+    {
+        std::lock_guard<std::mutex> pl(m_pcmMtx);
+        if (m_pcm) { snd_pcm_drop(m_pcm); snd_pcm_prepare(m_pcm); }
+    }
 }
 
 int C_TalkPlayer::AlsaWrite(const short* buf, unsigned long frames)
 {
+    // 序列化 talk(DecodePlayLoop) 与 prompt(PlayWavSync) 对 m_pcm 的写入。
+    // ALSA `default` 在 V831 上是独占设备，多个写入路径必须串行；这里通过
+    // m_pcmMtx 保证两路在 period 粒度上交替提交，效果听起来类似软件 mixing。
+    std::lock_guard<std::mutex> lk(m_pcmMtx);
+    if (!m_pcm) return -1;
+
     unsigned long off = 0;
     while (off < frames) {
         snd_pcm_sframes_t w = snd_pcm_writei(m_pcm, buf + off * kChannels,
@@ -265,4 +301,170 @@ void C_TalkPlayer::DecodePlayLoop()
 
     av_packet_free(&pkt);
     av_frame_free(&frame);
+}
+
+// ----------------------------------------------------------------------
+// 提示音播放：同步阻塞 + 复用 ALSA
+// ----------------------------------------------------------------------
+//
+// wav 头结构（标准 RIFF）：
+//   off=0  "RIFF"
+//   off=4  uint32 总长-8
+//   off=8  "WAVE"
+//   off=12 子块循环：
+//          { char[4] id; uint32 size; uint8 data[size]; }
+//          其中 "fmt " 描述格式、"data" 是 PCM 负载、"LIST"/"JUNK" 等需跳过。
+//
+// 第一版只接受：PCM(format=1) / 16-bit / 48000Hz / 1ch，与 ALSA 输出严格一致，
+// 直接 memcpy 到 ALSA buffer 不做重采样；不匹配返回 -1。
+//
+// 需要使用其它格式的 wav 时请先用 ffmpeg 转码：
+//   ffmpeg -i in.wav -ar 48000 -ac 1 -sample_fmt s16 out.wav
+// ----------------------------------------------------------------------
+
+namespace {
+
+inline uint32_t U32LE(const uint8_t* p) {
+    return  (uint32_t)p[0]
+         | ((uint32_t)p[1] << 8)
+         | ((uint32_t)p[2] << 16)
+         | ((uint32_t)p[3] << 24);
+}
+
+inline uint16_t U16LE(const uint8_t* p) {
+    return (uint16_t)(p[0] | ((uint32_t)p[1] << 8));
+}
+
+// 解析 wav 文件 → 校验格式，返回 data 子块在 buf 中的偏移和长度。
+// 失败返回 false。
+bool ParseWav48kMonoS16(const std::vector<uint8_t>& buf,
+                       size_t& dataOff, size_t& dataLen)
+{
+    if (buf.size() < 44) return false;
+    if (memcmp(&buf[0], "RIFF", 4) != 0) return false;
+    if (memcmp(&buf[8], "WAVE", 4) != 0) return false;
+
+    bool fmtOk = false;
+    size_t off = 12;
+    while (off + 8 <= buf.size()) {
+        const uint8_t* p   = &buf[off];
+        uint32_t       sz  = U32LE(p + 4);
+        size_t         end = off + 8 + sz;
+        if (end > buf.size()) return false;
+
+        if (!memcmp(p, "fmt ", 4)) {
+            if (sz < 16) return false;
+            uint16_t fmtTag    = U16LE(p + 8);
+            uint16_t channels  = U16LE(p + 10);
+            uint32_t sampleRate= U32LE(p + 12);
+            uint16_t bitsPer   = U16LE(p + 22);
+            // 支持 PCM(1) 与 部分工具写出来的 EXTENSIBLE(0xFFFE) 但要求子格式仍是 PCM
+            if ((fmtTag != 1 && fmtTag != 0xFFFE) ||
+                channels != 1 || sampleRate != 48000 || bitsPer != 16) {
+                return false;
+            }
+            fmtOk = true;
+        } else if (!memcmp(p, "data", 4)) {
+            if (!fmtOk) return false;
+            dataOff = off + 8;
+            dataLen = sz;
+            return true;
+        }
+        // 跳过本子块；wav 标准要求 chunk size 奇数时补 1 字节 padding
+        off = end + (sz & 1);
+    }
+    return false;
+}
+
+} // anonymous namespace
+
+int C_TalkPlayer::PlayWavSync(const std::string& path)
+{
+    // 1) 并发守护：同时只允许一段提示音在播
+    bool expected = false;
+    if (!m_promptBusy.compare_exchange_strong(expected, true)) {
+        CLOG_INF("TalkPlayer PlayWavSync busy, reject: %s\n", path.c_str());
+        return -3;
+    }
+    // RAII 保证退出时复位 busy 标志
+    struct BusyGuard {
+        std::atomic<bool>& flag;
+        ~BusyGuard() { flag.store(false); }
+    } _busyGuard{ m_promptBusy };
+
+    // 2) 读文件（door.wav 约 130KB，一次性读入足够）
+    FILE* fp = fopen(path.c_str(), "rb");
+    if (!fp) {
+        CLOG_ERR("TalkPlayer PlayWavSync fopen 失败: %s\n", path.c_str());
+        return -1;
+    }
+    fseek(fp, 0, SEEK_END);
+    long sz = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (sz <= 0 || sz > 8 * 1024 * 1024) {  // 单文件硬上限 8MB
+        CLOG_ERR("TalkPlayer PlayWavSync 文件大小异常: %ld\n", sz);
+        fclose(fp);
+        return -1;
+    }
+    std::vector<uint8_t> buf((size_t)sz);
+    size_t got = fread(buf.data(), 1, (size_t)sz, fp);
+    fclose(fp);
+    if (got != (size_t)sz) {
+        CLOG_ERR("TalkPlayer PlayWavSync fread 不足: got=%zu sz=%ld\n", got, sz);
+        return -1;
+    }
+
+    // 3) 解析 wav 头 → 校验 48k/16bit/mono
+    size_t dataOff = 0, dataLen = 0;
+    if (!ParseWav48kMonoS16(buf, dataOff, dataLen) || dataLen == 0) {
+        CLOG_ERR("TalkPlayer PlayWavSync wav 格式不符（要求 PCM/48k/16bit/mono）: %s\n",
+                 path.c_str());
+        return -1;
+    }
+
+    // 4) 确保 ALSA 已打开；若未打开则临时打开，播完后看是否要释放
+    bool tempOpened = false;
+    {
+        std::lock_guard<std::mutex> lk(m_initMtx);
+        if (!m_pcm) {
+            if (!EnsureAlsa_locked()) {
+                CLOG_ERR("TalkPlayer PlayWavSync EnsureAlsa 失败\n");
+                return -2;
+            }
+            tempOpened = true;
+        }
+    }
+
+    // 5) 灌入 ALSA：参数完全匹配，直接当 S16 mono 帧写
+    const short*   pcm    = reinterpret_cast<const short*>(&buf[dataOff]);
+    unsigned long  frames = dataLen / sizeof(short);  // mono: 1 sample = 1 frame
+    int wr = AlsaWrite(pcm, frames);
+
+    // 6) 等待 buffer 排空（drain），再决定是否归还 ALSA。
+    //    drain 必须在持锁时调用，否则会和 talk 的 writei 并发。
+    {
+        std::lock_guard<std::mutex> pl(m_pcmMtx);
+        if (m_pcm) snd_pcm_drain(m_pcm);
+    }
+
+    // 7) 临时打开的 ALSA：若整段播放期间没有 talk 客户端把它接管走，则归还。
+    //    （正常路径下 m_run==false 表示没有 talk 在线）
+    if (tempOpened) {
+        std::lock_guard<std::mutex> lk(m_initMtx);
+        if (!m_run.load()) {
+            CloseAlsa_locked();
+            CLOG_INF("TalkPlayer PlayWavSync 临时声卡已归还\n");
+        }
+    } else {
+        // 复用 talk 的 ALSA：drain 后用 prepare 把 PCM 状态拉回 SETUP，
+        // 让 talk 的下一次 writei 不会因为 drain 进入 DRAIN 状态而失败。
+        std::lock_guard<std::mutex> pl(m_pcmMtx);
+        if (m_pcm) snd_pcm_prepare(m_pcm);
+    }
+
+    if (wr != 0) {
+        CLOG_ERR("TalkPlayer PlayWavSync AlsaWrite 失败\n");
+        return -2;
+    }
+    return 0;
 }

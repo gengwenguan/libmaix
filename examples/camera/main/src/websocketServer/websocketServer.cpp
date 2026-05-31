@@ -548,7 +548,10 @@ void C_WebSocketServer::ProcessClient(int fd)
 
                 // 直播模式：握手成功后立即下发已缓存的 fMP4 init segment（ftyp+moov）
                 // 否则浏览器 MSE 无法初始化解码器，后续 fragment 全部无效
-                if (m_isLive) {
+                // 但 /ws/audio 纯音频路径不需要 fmp4 init segment（走 ADTS），跳过。
+                if (m_isLive &&
+                    client->urlPath != "/ws/audio" &&
+                    client->urlPath != "/ws/audio/") {
                     std::vector<uint8_t> initSegCopy;
                     {
                         std::lock_guard<std::mutex> lock(m_initSegMutex);
@@ -843,6 +846,9 @@ void C_WebSocketServer::BroadcastBinary(const uint8_t* data, size_t len)
     // 直接挂死生产者线程（H264Enc 回调），导致 vipp[0] frame 不被释放、
     // ISP 累计 select timeout，浏览器观察到的现象是"连上后画面全黑"。
     // 改为：持锁阶段只快照 fd + WSClient，释放锁后再发送。
+    //
+    // 路径分流：本函数仅对"看视频/直播 fmp4"的客户端发；/ws/audio 客户端只
+    // 接 AudioHub 推过来的 ADTS AAC，不再接收带视频的 fmp4 字节。
     std::vector<std::pair<int, std::shared_ptr<WSClient>>> snapshot;
     {
         std::lock_guard<std::mutex> lock(m_clientsMutex);
@@ -852,6 +858,30 @@ void C_WebSocketServer::BroadcastBinary(const uint8_t* data, size_t len)
             if (it == m_clients.end()) continue;
             auto& cli = it->second;
             if (cli && cli->state == WS_OPEN) {
+                // 跳过纯音频订阅者：他们走 BroadcastAudioBinary
+                if (cli->urlPath == "/ws/audio" || cli->urlPath == "/ws/audio/") continue;
+                snapshot.emplace_back(fd, cli);
+            }
+        }
+    }
+    for (auto& kv : snapshot) {
+        SendWSFrame(kv.first, data, (unsigned int)len, WS_BINARY);
+    }
+}
+
+void C_WebSocketServer::BroadcastAudioBinary(const uint8_t* data, size_t len)
+{
+    // 仅向 /ws/audio 路径下的客户端广播。同样先快照后发送，避免锁嵌套。
+    std::vector<std::pair<int, std::shared_ptr<WSClient>>> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(m_clientsMutex);
+        snapshot.reserve(m_clientFds.size());
+        for (int fd : m_clientFds) {
+            auto it = m_clients.find(fd);
+            if (it == m_clients.end()) continue;
+            auto& cli = it->second;
+            if (!cli || cli->state != WS_OPEN) continue;
+            if (cli->urlPath == "/ws/audio" || cli->urlPath == "/ws/audio/") {
                 snapshot.emplace_back(fd, cli);
             }
         }
