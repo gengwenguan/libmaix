@@ -128,8 +128,10 @@ C_HttpServer::~C_HttpServer()
 int C_HttpServer::Start()
 {
     // ---------------- HTTP 监听 ----------------
-    // Create socket
-    m_server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    // 用 AF_INET6 双栈：关闭 IPV6_V6ONLY 后，单个 socket 同时接收 IPv6 与 IPv4
+    // 连接（IPv4 客户端以 IPv4-mapped 地址 ::ffff:a.b.c.d 形式进来）。
+    // 这样局域网 IPv4 访问照常，板子的公网 IPv6 地址也能被外网直连。
+    m_server_fd = socket(AF_INET6, SOCK_STREAM, 0);
     if (m_server_fd < 0) {
         CLOG_ERR("HTTP socket creation failed: %s\n", strerror(errno));
         return -1;
@@ -143,17 +145,20 @@ int C_HttpServer::Start()
         m_server_fd = -1;
         return -1;
     }
+    // 关闭 v6only，让一个 v6 socket 同时收 v4+v6（系统默认 bindv6only=0，这里显式确保）
+    int v6only = 0;
+    setsockopt(m_server_fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
 
     // Set non-blocking mode
     int flags = fcntl(m_server_fd, F_GETFL, 0);
     fcntl(m_server_fd, F_SETFL, flags | O_NONBLOCK);
 
     // Bind address
-    struct sockaddr_in address;
+    struct sockaddr_in6 address;
     memset(&address, 0, sizeof(address));
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(m_port);
+    address.sin6_family = AF_INET6;
+    address.sin6_addr   = in6addr_any;
+    address.sin6_port   = htons(m_port);
 
     if (bind(m_server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         CLOG_ERR("HTTP bind failed: %s\n", strerror(errno));
@@ -175,19 +180,21 @@ int C_HttpServer::Start()
 
     // ---------------- HTTPS 监听（可选） ----------------
     if (m_pTls && m_tlsPort > 0) {
-        m_tlsServerFd = socket(AF_INET, SOCK_STREAM, 0);
+        m_tlsServerFd = socket(AF_INET6, SOCK_STREAM, 0);
         if (m_tlsServerFd < 0) {
             CLOG_ERR("HTTPS socket creation failed: %s\n", strerror(errno));
         } else {
             int o = 1;
             setsockopt(m_tlsServerFd, SOL_SOCKET, SO_REUSEADDR, &o, sizeof(o));
+            int v6o = 0;
+            setsockopt(m_tlsServerFd, IPPROTO_IPV6, IPV6_V6ONLY, &v6o, sizeof(v6o));
             int fl = fcntl(m_tlsServerFd, F_GETFL, 0);
             fcntl(m_tlsServerFd, F_SETFL, fl | O_NONBLOCK);
-            struct sockaddr_in addr2;
+            struct sockaddr_in6 addr2;
             memset(&addr2, 0, sizeof(addr2));
-            addr2.sin_family = AF_INET;
-            addr2.sin_addr.s_addr = INADDR_ANY;
-            addr2.sin_port = htons(m_tlsPort);
+            addr2.sin6_family = AF_INET6;
+            addr2.sin6_addr   = in6addr_any;
+            addr2.sin6_port   = htons(m_tlsPort);
             if (bind(m_tlsServerFd, (struct sockaddr*)&addr2, sizeof(addr2)) < 0 ||
                 listen(m_tlsServerFd, 10) < 0) {
                 CLOG_ERR("HTTPS bind/listen failed: %s\n", strerror(errno));
@@ -272,7 +279,7 @@ void C_HttpServer::AcceptThread()
 
         // 处理新连接：HTTP/HTTPS 共用同一个 ProcessClient，差别仅在握手阶段
         auto handleAccept = [this](int listenFd, bool isTls) {
-            struct sockaddr_in client_addr;
+            struct sockaddr_storage client_addr;   // 兼容 IPv4/IPv6 客户端地址
             socklen_t addr_len = sizeof(client_addr);
             int new_fd = accept(listenFd, (struct sockaddr *)&client_addr, &addr_len);
             if (new_fd < 0) return;

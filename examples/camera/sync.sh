@@ -14,11 +14,11 @@ set -e
 
 # ---------- 配置 ----------
 BUILD_USER="root"
-BUILD_HOST="192.168.1.10"
+BUILD_HOST="2409:8a1e:7a54:f240:945f:84d6:7afe:d51b"
 BUILD_DIR="/root/work/libmaix/examples/camera"
 
 DEVICE_USER="root"
-DEVICE_HOST="192.168.1.28"
+DEVICE_HOST="192.168.1.13"
 DEVICE_DIR="/root/maix_dist"
 DEVICE_PASS="root"          # 开发板 ssh 密码（与 scppush.sh 保持一致）
 
@@ -41,6 +41,22 @@ SSH_COMPAT_OPTS="-o StrictHostKeyChecking=no \
 
 LOCAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# IPv6 字面量（含 ':'）无法直接放进 rsync/scp 的 user@host:path 语法，也无法作为
+# ssh 的 hostname 直接 resolve（macOS 自带 openrsync/ssh 都不认 [ipv6] 方括号写法，
+# 会报 "Could not resolve hostname [2409..."）。
+#
+# 统一解法："不含冒号的占位别名 + ssh -o HostName=<真实地址> 注入"：
+#   - rsync/ssh/scp 看到的 host 是别名 build6，里头没有冒号，不会被错拆；
+#   - 真正要连的 IPv6 地址通过 ssh 的 -o HostName= 解析。
+# 这套写法在 IPv4 / IPv6 / 域名下都成立（IPv4 时别名就是地址本身、注入项为空）。
+if [[ "${BUILD_HOST}" == *:* ]]; then
+    BUILD_SSH_TARGET="build6"                         # 不含冒号的占位别名
+    BUILD_SSH_OPT="-o HostName=${BUILD_HOST}"          # ssh 据此连真实 IPv6
+else
+    BUILD_SSH_TARGET="${BUILD_HOST}"
+    BUILD_SSH_OPT=""
+fi
+
 # ---------- 颜色 ----------
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 log()  { echo -e "${GREEN}[sync]${NC} $*"; }
@@ -62,15 +78,15 @@ do_sync() {
         --exclude='core.*' \
         --exclude='video/' \
         --exclude='.DS_Store' \
-        -e "ssh -o StrictHostKeyChecking=no" \
-        "${LOCAL_DIR}/" "${BUILD_USER}@${BUILD_HOST}:${BUILD_DIR}/"
+        -e "ssh -o StrictHostKeyChecking=no ${BUILD_SSH_OPT}" \
+        "${LOCAL_DIR}/" "${BUILD_USER}@${BUILD_SSH_TARGET}:${BUILD_DIR}/"
     log "源码同步完成"
 }
 
 # ---------- 编译机：执行 build ----------
 do_build() {
     log "在 ${BUILD_HOST} 执行 python3 project.py build"
-    ssh "${BUILD_USER}@${BUILD_HOST}" \
+    ssh -o StrictHostKeyChecking=no ${BUILD_SSH_OPT} "${BUILD_USER}@${BUILD_SSH_TARGET}" \
         "cd ${BUILD_DIR} && python3 project.py build"
     log "编译完成，产物：${BUILD_HOST}:${BUILD_DIR}/dist/camera"
 }
@@ -86,7 +102,7 @@ do_push_device() {
         log "注入环境变量: ${EXTRA_ENV}"
     fi
 
-    ssh "${BUILD_USER}@${BUILD_HOST}" "
+    ssh -o StrictHostKeyChecking=no ${BUILD_SSH_OPT} "${BUILD_USER}@${BUILD_SSH_TARGET}" "
         set -e
         cd ${BUILD_DIR}
 
@@ -132,6 +148,15 @@ do_push_device() {
             echo '[sync] !! dist/cert 不存在，跳过证书推送 (HTTPS 将启动失败)'
         fi
 
+        echo '[sync] 2.3) scp 推送内存看门狗脚本 (dist/mem_watchdog.sh)'
+        if [ -f dist/mem_watchdog.sh ]; then
+            sshpass -p '${DEVICE_PASS}' scp -O \
+                ${SSH_COMPAT_OPTS} \
+                dist/mem_watchdog.sh ${DEVICE_USER}@${DEVICE_HOST}:${DEVICE_DIR}/
+        else
+            echo '[sync] !! dist/mem_watchdog.sh 不存在，跳过看门狗推送'
+        fi
+
         echo '[sync] 3) 启动 camera (后台运行)'
         # 开发板 BusyBox 既无 nohup 也无 setsid。
         # 用子 shell + trap 屏蔽 HUP + 关闭所有继承自 ssh 的 fd 来后台启动。
@@ -155,20 +180,20 @@ do_pull() {
     fi
     log "scp ${DEVICE_HOST}:${remote_path} → ${local_path}"
     # 经编译机中转：因为 Mac 没装 sshpass，复用编译机已经能联通开发板的链路
-    ssh "${BUILD_USER}@${BUILD_HOST}" "
+    ssh -o StrictHostKeyChecking=no ${BUILD_SSH_OPT} "${BUILD_USER}@${BUILD_SSH_TARGET}" "
         sshpass -p '${DEVICE_PASS}' scp -O ${SSH_COMPAT_OPTS} \
             ${DEVICE_USER}@${DEVICE_HOST}:${remote_path} /tmp/_pull_tmp
     "
-    scp -o StrictHostKeyChecking=no \
-        "${BUILD_USER}@${BUILD_HOST}:/tmp/_pull_tmp" "${local_path}"
-    ssh "${BUILD_USER}@${BUILD_HOST}" "rm -f /tmp/_pull_tmp"
+    scp -o StrictHostKeyChecking=no ${BUILD_SSH_OPT} \
+        "${BUILD_USER}@${BUILD_SSH_TARGET}:/tmp/_pull_tmp" "${local_path}"
+    ssh -o StrictHostKeyChecking=no ${BUILD_SSH_OPT} "${BUILD_USER}@${BUILD_SSH_TARGET}" "rm -f /tmp/_pull_tmp"
     log "拉取完成"
 }
 
 # ---------- 远端清理 ----------
 do_clean() {
     warn "清理 ${BUILD_HOST}:${BUILD_DIR}/build & dist"
-    ssh "${BUILD_USER}@${BUILD_HOST}" "cd ${BUILD_DIR} && rm -rf build dist"
+    ssh -o StrictHostKeyChecking=no ${BUILD_SSH_OPT} "${BUILD_USER}@${BUILD_SSH_TARGET}" "cd ${BUILD_DIR} && rm -rf build dist"
     log "清理完成"
 }
 
@@ -178,7 +203,7 @@ do_log() {
     log "tail 开发板日志（Ctrl+C 退出，远端 tail 会随会话一起结束）"
     # -tt 强制分配 PTY，使本地 Ctrl+C 直接转发为 SIGINT/HUP，并在 ssh 关闭时由内核回收远端进程
     # 进入 tail 前先 killall 残留的 tail，防止越积越多
-    ssh -t "${BUILD_USER}@${BUILD_HOST}" "
+    ssh -t -o StrictHostKeyChecking=no ${BUILD_SSH_OPT} "${BUILD_USER}@${BUILD_SSH_TARGET}" "
         sshpass -p '${DEVICE_PASS}' ssh -tt \
             ${SSH_COMPAT_OPTS} \
             ${DEVICE_USER}@${DEVICE_HOST} \

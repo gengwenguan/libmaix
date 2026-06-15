@@ -103,6 +103,26 @@ if(_prompt_src_wavs)
 endif()
 
 # ----------------------------------------------------------------------
+# 拷贝内存看门狗脚本到 dist/
+#   examples/camera/mem_watchdog.sh  →  dist/mem_watchdog.sh
+# 设备端常驻运行：监控 camera VmData，超 80MB 自动重启（应对闭源库慢泄漏）。
+# 开机自启需手动挂到 /etc/init.d/S02app（见 mem_watchdog.sh 顶部注释）。
+# ----------------------------------------------------------------------
+set(_wd_src "${CMAKE_CURRENT_LIST_DIR}/mem_watchdog.sh")
+set(_wd_dst "${PROJECT_DIST_DIR}/mem_watchdog.sh")
+if(EXISTS "${_wd_src}")
+    add_custom_command(
+        OUTPUT  "${_wd_dst}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_wd_src}" "${_wd_dst}"
+        DEPENDS "${_wd_src}"
+        COMMENT "-- copy mem_watchdog.sh to ${_wd_dst}"
+    )
+    add_custom_target(copy_watchdog ALL DEPENDS "${_wd_dst}")
+    add_dependencies(${PROJECT_NAME} copy_watchdog)
+endif()
+
+
+# ----------------------------------------------------------------------
 # 拷贝 TLS 自签证书到 dist/cert/
 # 设备端运行时通过 <exe_dir>/cert/server.crt + server.key 加载。
 # 证书生成方式（Mac/编译机均可）：

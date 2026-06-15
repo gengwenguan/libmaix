@@ -50,6 +50,18 @@
 
         /* common */
         video{ width:100%; background:#000; border-radius:8px; }
+
+        /* 实况画面叠加层：把 <video> 包进相对定位容器，右上角浮一个本地实时
+           时钟（秒级，格式同开发板烧录）。开发板把"采集时刻"烧进画面左下角，
+           两者之差≈端到端直播延迟，可肉眼逐位比对。 */
+        .live-stage { position: relative; }
+        #liveClock  { position: absolute; right: 10px; top: 10px;
+                      padding: 4px 10px; background: rgba(0,0,0,.55);
+                      color: #7CFC00; font-family: ui-monospace, Menlo, Consolas, monospace;
+                      font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600;
+                      letter-spacing: .5px;
+                      border-radius: 4px; pointer-events: none;
+                      text-shadow: 0 1px 2px rgba(0,0,0,.6); }
         button, select, input[type="date"] {
             background:#2a5298; color:#fff; border:0; padding:8px 14px;
             border-radius:6px; cursor:pointer; font-size:13px;
@@ -178,7 +190,10 @@
 
         <!-- ============ 实况 Tab ============ -->
         <div class="pane active" id="pane-live">
-            <video id="v" autoplay muted playsinline controls></video>
+            <div class="live-stage">
+                <video id="v" autoplay muted playsinline controls></video>
+                <div id="liveClock">---------- --:--:--</div>
+            </div>
             <div class="row" style="margin-top:12px;">
                 <button id="btnStart">▶ 开始</button>
                 <button id="btnStop">⏹ 停止</button>
@@ -209,6 +224,14 @@
                 <button id="pbRefresh">刷新</button>
                 <span class="stat" id="pbCount"></span>
                 <span style="flex:1"></span>
+                <span>倍速：</span>
+                <select id="pbSpeed" title="回放倍速；>2x 自动静音，避免高速音频失真">
+                    <option value="1">1x</option>
+                    <option value="2">2x</option>
+                    <option value="4">4x</option>
+                    <option value="8">8x</option>
+                    <option value="16">16x</option>
+                </select>
                 <button id="pbPrev"  title="上一片">⟵ 上一片</button>
                 <button id="pbNext"  title="下一片">下一片 ⟶</button>
             </div>
@@ -495,6 +518,21 @@
     const recDot  = document.getElementById('recDot');
     const recStat = document.getElementById('recStat');
 
+    // 本地实时时钟：渲染到画面右上角，用于和开发板烧录在画面左下角的
+    // "采集时刻"肉眼比对，差值≈端到端直播延迟。
+    // 格式与开发板烧录完全一致（YYYY-MM-DD HH:MM:SS），方便逐位对齐读差。
+    // 秒级即可（毫秒位对人眼比对无意义且抖动分心）。用 setInterval 250ms
+    // 刷新保证秒进位及时；切到后台 tab 时浏览器自动降频，省电。
+    const liveClock = document.getElementById('liveClock');
+    (function tickClock() {
+        const d  = new Date();
+        const p2 = n => String(n).padStart(2, '0');
+        liveClock.textContent =
+            `${d.getFullYear()}-${p2(d.getMonth()+1)}-${p2(d.getDate())} ` +
+            `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+        setTimeout(tickClock, 250);
+    })();
+
     // 直播 WebSocket 端口与协议对应关系（后端分别监听）：
     //   http://<host>:8080/  →  ws://<host>:8081/   （明文 ws）
     //   https://<host>:8443/ →  wss://<host>:8444/  （TLS wss）
@@ -504,16 +542,30 @@
         const isHttps = location.protocol === 'https:';
         const proto   = isHttps ? 'wss' : 'ws';
         const port    = isHttps ? 8444  : 8081;
-        const host    = location.hostname || '127.0.0.1';
+        // location.hostname 对 IPv6 字面量会去掉方括号（如 2409:8a1e:...），
+        // 直接拼 ws://2409:..:8081 会被解析成非法 URL。含 ':' 即为 IPv6，补回方括号。
+        let host = location.hostname || '127.0.0.1';
+        if (host.indexOf(':') !== -1 && host[0] !== '[') host = `[${host}]`;
         return `${proto}://${host}:${port}/`;
     })();
 
     let ws = null, ms = null, sb = null;
     let queue = [], appending = false, gotInit = false;
+    let liveWanted = false;   // 用户是否"想看直播"：区分主动停 vs 切后台临时停
 
+    // 日志：限制最多保留 200 行，超出从顶部丢弃。
+    // 原实现是 logBox.innerHTML += ... 无上限累加，长时间挂机看直播时
+    // DOM 节点无限增长 → 页面自身内存膨胀、滚动变卡。改为 appendChild +
+    // 超限删首节点，O(1) 控制规模。
+    const LOG_MAX_LINES = 200;
     function log(msg) {
         const t = new Date().toLocaleTimeString();
-        logBox.innerHTML += `[${t}] ${msg}<br/>`;
+        const line = document.createElement('div');
+        line.textContent = `[${t}] ${msg}`;
+        logBox.appendChild(line);
+        while (logBox.childElementCount > LOG_MAX_LINES) {
+            logBox.removeChild(logBox.firstChild);
+        }
         logBox.scrollTop = logBox.scrollHeight;
     }
     function setStat(s) { stat.textContent = s; }
@@ -542,24 +594,40 @@
                     try { v.currentTime = start; } catch(e){}
                     v.play().catch(()=>{});
                 }
-                // 2) 低延时追尾：直播播放头落后 buffered 末端超过 LIVE_LAG_LIMIT 就直接
-                //    跳到末端 -0.3s。
+                // 2) 低延时追尾：直播播放头落后 buffered 末端时，优先用"微调倍速"平滑追，
+                //    避免 seek 触发解码重置的几十毫秒卡顿。只有落后过大（切后台 tab 回来等）
+                //    倍速追太慢时才退化为硬 seek 拉平。
                 //    触发场景（既覆盖启动也覆盖稳态）：
                 //      - 起播：浏览器 MSE 收到 init+几个 fragment 后默认会攒 2-5s 才开播，
-                //        currentTime 起步就远低于 buffered.end，这里第一次 updateend 时
-                //        如果 lag > 1.5s 就立刻拉平 → 启动延迟从 6-7s 压到 < 1s。
+                //        currentTime 起步就远低于 buffered.end。
                 //      - 切到非直播 tab：Chrome 在 background tab 里限速 video 解码，
                 //        WebSocket → SourceBuffer 仍持续 append → buffered.end 飞涨，
                 //        currentTime 龟速前进 → 切回 tab 时累积几十秒甚至几分钟延迟。
                 //      - 网络抖动一次性涌入大量 fragment 同样会拉大差距。
-                //    阈值 1.5s（原来 3.0s 太宽松，起播就追不平了）：考虑到 fragment
-                //    时长 ~500ms-1s + IDR 周期 1s，差距 < 1.5s 是正常水位，不需要 seek
-                //    （seek 会触发解码重置看到几十毫秒卡顿）。
-                else if (end - v.currentTime > 1.5) {
-                    const target = end - 0.3;
-                    log(`live tail catch-up: ${v.currentTime.toFixed(3)} -> ${target.toFixed(3)} (lag=${(end - v.currentTime).toFixed(2)}s)`);
-                    try { v.currentTime = target; } catch(e){}
-                    v.play().catch(()=>{});
+                //    水位设计（fragment ~200-500ms + IDR 周期 1s）：
+                //      lag > LIVE_LAG_HARD(4s)  → 倍速追要几十秒，直接 seek 到 end-0.15
+                //      lag > LIVE_LAG_HIGH(0.6s)→ playbackRate=1.1 平滑追
+                //      lag <= LIVE_LAG_LOW(0.15)→ 恢复 playbackRate=1.0
+                //      0.15~0.6 之间为迟滞区，保持当前速度不抖动
+                else {
+                    const lag = end - v.currentTime;
+                    if (lag > 4) {
+                        const target = end - 0.15;
+                        log(`live tail seek(big lag): ${v.currentTime.toFixed(3)} -> ${target.toFixed(3)} (lag=${lag.toFixed(2)}s)`);
+                        try { v.currentTime = target; } catch(e){}
+                        if (v.playbackRate !== 1.0) v.playbackRate = 1.0;
+                        v.play().catch(()=>{});
+                    } else if (lag > 0.6) {
+                        if (v.playbackRate !== 1.1) {
+                            v.playbackRate = 1.1;
+                            log(`live tail speed-up 1.1x (lag=${lag.toFixed(2)}s)`);
+                        }
+                    } else if (lag <= 0.15) {
+                        if (v.playbackRate !== 1.0) {
+                            v.playbackRate = 1.0;
+                            log(`live tail back to 1.0x (lag=${lag.toFixed(2)}s)`);
+                        }
+                    }
                 }
                 // 3) 缓冲窗口压缩：原 30s/10s 是录像 / VOD 思路，直播完全用不到那么多。
                 //    end-start > 8s 就把头部修剪到只剩 4s，进一步压缩 SourceBuffer 内
@@ -576,6 +644,7 @@
     function startLive() {
         if (ws) { log('已经在连接中'); return; }
         gotInit = false; queue = [];
+        try { v.playbackRate = 1.0; } catch(e){}   // 复位上一轮残留的追尾倍速
         ms = new MediaSource();
         v.src = URL.createObjectURL(ms);
         ms.addEventListener('sourceopen', () => {
@@ -598,6 +667,10 @@
             }
             queue.push(buf);
             pump();
+            // 首屏起播提速：MSE 默认会攒 2-5 个 fragment 才自动开播，黑屏明显。
+            // 收到数据就主动 play()，让浏览器一拿到可解码帧立刻出画。muted 状态下
+            // 自动播放策略允许，play() 不会被拦。
+            v.play().catch(()=>{});
         };
         ws.onclose = () => { log('WebSocket 关闭'); setStat('已断开'); ws = null; };
         ws.onerror = () => log('WebSocket 错误');
@@ -609,8 +682,20 @@
         ms = null; sb = null; queue = []; gotInit = false;
         setStat('已停止');
     }
-    btnS.onclick  = startLive;
-    btnE.onclick  = stopLive;
+    btnS.onclick  = () => { liveWanted = true;  startLive(); };
+    btnE.onclick  = () => { liveWanted = false; stopLive();  };
+
+    // 页面隐藏时省流：切到后台 tab / 锁屏时，浏览器仍会通过 WebSocket 持续接收
+    // fragment（白白消耗手机流量和电），且 background tab 解码被限速会让 buffered
+    // 越堆越多、切回来延迟暴涨。这里在 hidden 时主动断流，visible 时若用户本来
+    // 在看就自动重连续播。liveWanted 区分"用户主动停"与"切后台临时停"。
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            if (liveWanted && ws) { log('页面隐藏，暂停拉流省流'); stopLive(); }
+        } else {
+            if (liveWanted && !ws) { log('页面恢复，重新连接'); startLive(); }
+        }
+    });
     // 静音按钮做成二态切换：跟随 video.muted 自动更新文案/图标
     function syncMuteBtn() {
         if (v.muted) { btnUn.textContent = '🔇 取消静音'; btnUn.title = '当前已静音，点击开启声音'; }
@@ -792,7 +877,9 @@
 
             // 2) 起 WebSocket（与直播分离，独立的 /ws/talk endpoint）
             //    HTTP 模式按钮不显示走不到这；这里强制 wss
-            const wsUrl = `wss://${location.hostname}:8444/ws/talk`;
+            let talkHost = location.hostname;
+            if (talkHost.indexOf(':') !== -1 && talkHost[0] !== '[') talkHost = `[${talkHost}]`;
+            const wsUrl = `wss://${talkHost}:8444/ws/talk`;
             talkWs = new WebSocket(wsUrl);
             talkWs.binaryType = 'arraybuffer';
             await new Promise((resolve, reject) => {
@@ -883,11 +970,53 @@
     const segList   = document.getElementById('segList');
     const pbPrev    = document.getElementById('pbPrev');
     const pbNext    = document.getElementById('pbNext');
+    const pbSpeed   = document.getElementById('pbSpeed');
     const tlCanvas  = document.getElementById('timeline');
     const tlTip     = document.getElementById('tlTip');
 
     let pbSegments = [];     // [{name,size,hms,sec, dur}]
     let pbCurIdx   = -1;
+
+    // ---- 回放倍速 ----
+    // 原生 <video> 控件菜单只给到 2x，但 playbackRate API 本身支持到 16x。
+    // 用自定义下拉框直接设 playbackRate，突破原生上限。
+    // 注意：切分片时 pbVideo.src 会被重设，playbackRate 会被浏览器复位成 1.0，
+    // 所以把目标倍速存到 pbDesiredRate，并在每次源加载后重新 apply。
+    // >2x 自动静音：高倍速音频会刺耳失真，且解码音频徒增开销。
+    let pbDesiredRate = 1;
+    // 切片重载时刻：teardown / 重设 src 会让浏览器把 playbackRate 复位成 1.0 并触发
+    // 一次 ratechange。若此时把 1.0 回写进 pbDesiredRate，就会把用户选的倍速冲掉
+    // （表现为"跳转下一段后倍速没了"）。用这个时间戳在重载后的短窗口内屏蔽回写。
+    let pbReloadAt = 0;
+    function applyPbRate() {
+        // 关键：同时设 defaultPlaybackRate。HTML 媒体 load 算法在 src 变更时会把
+        // playbackRate 复位成 defaultPlaybackRate（默认 1），所以仅设 playbackRate
+        // 在切片重载时会被冲回 1x（加载时序不同，applyPbRate 补救有时来不及）。
+        // 把 defaultPlaybackRate 也设成目标倍速，浏览器复位时就直接复位到目标值。
+        try { pbVideo.defaultPlaybackRate = pbDesiredRate; } catch(e){}
+        try { pbVideo.playbackRate = pbDesiredRate; } catch(e){}
+        pbVideo.muted = (pbDesiredRate > 2);
+    }
+    pbSpeed.onchange = () => {
+        pbDesiredRate = parseFloat(pbSpeed.value) || 1;
+        applyPbRate();
+    };
+    // 切片重载后 src 变更会复位 playbackRate，这几个事件兜底重新施加
+    pbVideo.addEventListener('loadedmetadata', applyPbRate);
+    pbVideo.addEventListener('play',           applyPbRate);
+    // 用户用原生控件改了倍速时，同步下拉框显示（保持一致）；但重载窗口内的
+    // 自动复位（→1.0）不算用户意图，直接忽略，避免冲掉 pbDesiredRate。
+    pbVideo.addEventListener('ratechange', () => {
+        if (performance.now() - pbReloadAt < 1500) return;
+        const r = pbVideo.playbackRate;
+        if (Math.abs(r - pbDesiredRate) > 0.01) {
+            pbDesiredRate = r;
+            // 下拉框若有对应档位就选中，否则不强改
+            const opt = Array.from(pbSpeed.options).find(o => parseFloat(o.value) === r);
+            if (opt) pbSpeed.value = opt.value;
+            pbVideo.muted = (r > 2);
+        }
+    });
 
     // ---- 自定义时间叠加层（Q1）----
     //
@@ -1132,6 +1261,10 @@
     let pbSeekFetch     = null;
     let pbSeekListener  = null;
     let pbTimeListener  = null;
+    // ensureLookahead 是 playSegByMse 内部闭包（捕获了 myEpoch / refillFrom），
+    // 但 waiting 事件 / 250ms 兜底轮询在外层，需要能调它来"卡住时继续补最后的片"。
+    // 故把当前片的 ensureLookahead 暴露到这个模块级引用，teardown 时清空。
+    let pbEnsureLookahead = null;
     // 真理之源：本片字节是否已全部 append 进 SourceBuffer。
     // 只有这个为 true 时，"currentTime 到达 buffered 末端"才能解释为"播完"。
     // 否则 stall 在末端只能解释为"lookahead/seek refill 还在路上"，绝不能切片。
@@ -1150,6 +1283,7 @@
             try { pbVideo.removeEventListener('timeupdate', pbTimeListener); } catch(e){}
             pbTimeListener = null;
         }
+        pbEnsureLookahead = null;
         pbCurIdxJson    = null;
         pbCurUrlForSeek = null;
         pbAppendedFrags = null;
@@ -1227,6 +1361,7 @@
     }
     async function playSegByMse(url, seg, seekOffset) {
         const myEpoch = ++pbEpoch;     // 占用本次 epoch
+        pbReloadAt = performance.now(); // 标记重载窗口，屏蔽复位引发的 ratechange 回写
         teardownPbMse();
         if (!('MediaSource' in window) || !MediaSource.isTypeSupported(MIME)) {
             // 回退：直接 src（拖动可能失效，但至少能播）
@@ -1587,6 +1722,9 @@
             pbTimeListener = () => { ensureLookahead(); };
             pbVideo.addEventListener('seeking',    pbSeekListener);
             pbVideo.addEventListener('timeupdate', pbTimeListener);
+            // 暴露给外层：waiting 事件 / 250ms 兜底轮询在播放头 stall（timeupdate 停发）
+            // 时也能继续补最后的 fragment，避免"卡在末尾→N-1 永远拉不到→不切片"死锁。
+            pbEnsureLookahead = ensureLookahead;
 
             const fixDur2 = () => {
                 if (myEpoch !== pbEpoch) return;
@@ -1736,11 +1874,17 @@
     //                    要么 idx 路径下 pbAppendedFrags 含 N-1 且 cur 已进入末段
     let advancing = false;
     let endStallSince = 0;       // currentTime 到达 buffered 末端的时刻（ms）
+    let pbLastCur = -1;          // 上次观测的 currentTime，用于检测"是否还在前进"
 
     // 判断当前播放头是否处于"末段已就绪"状态：
     //   - 非 idx 路径（缓存 / 流式）：直接看 pbAllAppended（整片字节都进 sb 了）
-    //   - idx 路径：最后一个 fragment 已 append + currentTime >= 该 fragment 起点
-    //     这种情况下中段空洞不影响"播完判定"，因为播放头早已经过了它们
+    //   - idx 路径：最后一个 fragment 已 append，且播放头满足以下任一：
+    //       a) cur >= 末 fragment 起点（正常播放：平滑推进自然越过）
+    //       b) cur 已 stall 在 buffered 连续区末端附近（高倍速：大步跳进后停在
+    //          buffered 尽头，位置可能恰好落在末 fragment 起点之前的浮点临界，
+    //          cur 不再前进 → a) 永远差一点点判不过 → 永不切片。用 buffered 末端
+    //          兜底：既然 N-1 在手、播放头又停在连续 buffered 的尽头，就是真播完）
+    //     中段空洞不影响判定，因为播放头早已经过了它们
     function isPlayheadAtTrueEnd() {
         if (pbAllAppended) return true;
         if (!pbCurIdxJson || !pbAppendedFrags) return false;
@@ -1750,7 +1894,16 @@
         const ts = pbCurIdxJson.ts || 90000;
         const lastStart = pbCurIdxJson.frags[N - 1][0] / ts;
         const cur = pbVideo.currentTime || 0;
-        return cur >= lastStart - 0.4;
+        if (cur >= lastStart - 0.4) return true;            // a) 正常播放
+        // b) 高倍速兜底：播放头已落在最后一段 buffered range 内（不论距末端多远）。
+        //    高倍速 stall 位置距 bEnd 不固定，故用"在末段 range 内"判断而非固定距离。
+        const b = pbVideo.buffered;
+        if (b && b.length > 0) {
+            const bEnd   = b.end(b.length - 1);
+            const bStart = b.start(b.length - 1);
+            if (bEnd > 0.5 && cur >= bStart - 0.1 && cur <= bEnd + 0.1) return true;
+        }
+        return false;
     }
 
     function tryAdvanceToNext(reason) {
@@ -1770,16 +1923,34 @@
         } else {
             const b = pbVideo.buffered;
             if (b && b.length > 0) {
-                const bEnd = b.end(b.length - 1);
-                if (cur >= bEnd - 0.4 && bEnd > 0.5) {
-                    const now = performance.now();
-                    if (endStallSince === 0) endStallSince = now;
-                    if (now - endStallSince >= 600) {
-                        why = `stall at buffered end (${cur.toFixed(2)}/${bEnd.toFixed(2)}` +
+                const bEnd   = b.end(b.length - 1);
+                const bStart = b.start(b.length - 1);
+                // 判定"停在最后一段 buffered 内且不再前进"，而非"距末端固定距离"。
+                // 背景：高倍速越高，播放头 stall 的位置距 bEnd 越远（4x≈0.47s，
+                // 16x≈0.88s…），固定容差总会被更高倍速突破（打地鼠）。
+                // 稳健判据：播放头落在最后一段 buffered range 内（bStart..bEnd），
+                // 且 currentTime 在 ≥600ms 内几乎没前进（stall）。配合
+                // isPlayheadAtTrueEnd（N-1 已 append）双保险，就是真播完。
+                const insideLastRange = (cur >= bStart - 0.1 && cur <= bEnd + 0.1);
+                const now = performance.now();
+                if (insideLastRange && bEnd > 0.5) {
+                    const moved = Math.abs(cur - pbLastCur) > 0.05;
+                    pbLastCur = cur;
+                    if (moved) {
+                        // 还在前进，不是 stall；但若已非常接近 bEnd 也允许起算
+                        if (cur < bEnd - 0.8) { endStallSince = 0; }
+                        else if (endStallSince === 0) endStallSince = now;
+                    } else {
+                        if (endStallSince === 0) endStallSince = now;
+                    }
+                    if (endStallSince !== 0 && now - endStallSince >= 600) {
+                        why = `stall in last range (${cur.toFixed(2)} in ` +
+                              `${bStart.toFixed(2)}..${bEnd.toFixed(2)}` +
                               `, ${(now - endStallSince).toFixed(0)}ms)`;
                     }
                 } else {
                     endStallSince = 0;
+                    pbLastCur = cur;
                 }
             }
         }
@@ -1796,14 +1967,24 @@
         }, 0);
     }
     pbVideo.addEventListener('ended',      () => tryAdvanceToNext('ended'));
-    pbVideo.addEventListener('waiting',    () => tryAdvanceToNext('waiting'));
+    pbVideo.addEventListener('waiting',    () => {
+        // 卡住时优先"继续补最后的 fragment"——若末段还没 append，光调 tryAdvanceToNext
+        // 会被 isPlayheadAtTrueEnd 守卫挡掉，导致永远停在末尾。先补片，N-1 到位后再切。
+        if (pbEnsureLookahead) { try { pbEnsureLookahead(); } catch(e){} }
+        tryAdvanceToNext('waiting');
+    });
     pbVideo.addEventListener('timeupdate', () => {
         drawTimeline();   // 更新红色播放游标
         maybeStartPrefetch();
         tryAdvanceToNext('timeupdate');
     });
-    // 250ms 兜底轮询：即使所有 video 事件都不发，也能切（仅在 pbAllAppended 时生效）
-    setInterval(() => tryAdvanceToNext('poll'), 250);
+    // 250ms 兜底轮询：即使所有 video 事件都不发，也能补片 + 切片。
+    // 补片放在切片前：stall 在末尾时 timeupdate 停发，靠这个轮询继续把最后的
+    // fragment 拉完，N-1 到位后 isPlayheadAtTrueEnd 转 true，下一拍即可切。
+    setInterval(() => {
+        if (pbEnsureLookahead) { try { pbEnsureLookahead(); } catch(e){} }
+        tryAdvanceToNext('poll');
+    }, 250);
 
     // 自动切换诊断辅助：每 2s 在 pbAllAppended=false 时打印当前进度状态。
     // 用户报"无法自动切下一片"时直接看 console 这条 log 就能判断卡在哪：
