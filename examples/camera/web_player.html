@@ -553,6 +553,58 @@
     let queue = [], appending = false, gotInit = false;
     let liveWanted = false;   // 用户是否"想看直播"：区分主动停 vs 切后台临时停
 
+    // 起播预缓冲：每秒一个 IDR、fragment ~1s，若拿到第 1 片就 seek 到末端并 play，
+    // 缓冲只有 ~1s，播放头立刻贴边、readyState 不足 → 卡在首帧。改为先攒够
+    // LIVE_START_BUFFER 秒再起播，起步即有水位，首帧顺滑。liveStarted 标记是否已起播。
+    const LIVE_START_BUFFER = 1.6;
+    let liveStarted = false;
+    // 方案C：大 PTS 归零。板子 PTS 用单调时钟从进程启动累加，跑久了 fragment 的
+    // baseMediaDecodeTime(tfdt) 会涨到几十万秒。新客户端中途接入时，MSE 时间轴从 0
+    // 起却收到 tfdt=19万秒的 fragment → 解码基准错位 → 卡首帧/定格。
+    // 解法：解析首个 media fragment 的 tfdt，在 append 前设 sb.timestampOffset
+    // = -(tfdt/90000)，把前端时间轴拉回 ~0，与板子运行多久无关。
+    const VIDEO_TIMESCALE = 90000;   // 与 fmp4Muxer kTbVideo90k 一致
+    let tsOffsetSet = false;
+
+    // 扫 MP4 box 找 moof/traf/tfdt，返回 baseMediaDecodeTime(90kHz)；找不到返回 null。
+    // box 结构：[4B size][4B type][payload]。tfdt 在 moof>traf 内，full box：
+    // [4B size][4B 'tfdt'][1B version][3B flags][4B 或 8B baseMediaDecodeTime]。
+    function parseFirstTfdt(arrayBuf) {
+        const dv = new DataView(arrayBuf);
+        const len = dv.byteLength;
+        // 在 [off, end) 范围内遍历同级 box，需要进入容器(moof/traf)就递归
+        function scan(off, end) {
+            while (off + 8 <= end) {
+                const size = dv.getUint32(off);
+                const type = String.fromCharCode(
+                    dv.getUint8(off+4), dv.getUint8(off+5),
+                    dv.getUint8(off+6), dv.getUint8(off+7));
+                if (size < 8) return null;           // 防御非法 box
+                const payloadStart = off + 8;
+                const boxEnd = off + size;
+                if (boxEnd > end) return null;
+                if (type === 'moof' || type === 'traf') {
+                    const r = scan(payloadStart, boxEnd); // 容器：进入
+                    if (r !== null) return r;
+                } else if (type === 'tfdt') {
+                    const version = dv.getUint8(payloadStart);
+                    const vOff = payloadStart + 4;       // 跳过 version(1)+flags(3)
+                    if (version === 1) {
+                        // 64-bit：高32位通常为0，用 getUint32 拼，避免 BigInt 兼容问题
+                        const hi = dv.getUint32(vOff);
+                        const lo = dv.getUint32(vOff + 4);
+                        return hi * 4294967296 + lo;
+                    } else {
+                        return dv.getUint32(vOff);
+                    }
+                }
+                off = boxEnd;
+            }
+            return null;
+        }
+        try { return scan(0, len); } catch(e) { return null; }
+    }
+
     // 日志：限制最多保留 200 行，超出从顶部丢弃。
     // 原实现是 logBox.innerHTML += ... 无上限累加，长时间挂机看直播时
     // DOM 节点无限增长 → 页面自身内存膨胀、滚动变卡。改为 appendChild +
@@ -576,6 +628,20 @@
         if (appending || !sb || sb.updating) return;
         if (queue.length === 0) return;
         const chunk = queue.shift();
+        // 方案C：在 append 第一个 media fragment 之前，按其 tfdt 设 timestampOffset，
+        // 把大 PTS 拉回 ~0。init segment 无 tfdt（parseFirstTfdt 返回 null）跳过。
+        // timestampOffset 只影响之后 append 的数据，故必须在首片 append 前设好。
+        if (!tsOffsetSet) {
+            const tfdt = parseFirstTfdt(chunk);
+            if (tfdt !== null && tfdt > 0) {
+                const off = -(tfdt / VIDEO_TIMESCALE);
+                try {
+                    sb.timestampOffset = off;
+                    tsOffsetSet = true;
+                    log(`tsOffset set: tfdt=${tfdt} -> offset=${off.toFixed(3)}s`);
+                } catch(e) { log('set timestampOffset failed: ' + e.message); }
+            }
+        }
         try { appending = true; sb.appendBuffer(chunk); }
         catch (e) { appending = false; log('appendBuffer error: ' + e.message); }
     }
@@ -588,6 +654,24 @@
             if (sb.buffered.length > 0) {
                 const start = sb.buffered.start(0);
                 const end   = sb.buffered.end(sb.buffered.length - 1);
+                // 0) 起播预缓冲门槛：还没起播时，先攒够 LIVE_START_BUFFER 秒再 seek 到
+                //    末端附近并 play。避免只缓冲 1 片(≈1s)就贴边播导致卡首帧。
+                if (!liveStarted) {
+                    if (end - start >= LIVE_START_BUFFER) {
+                        const target = Math.max(start, end - 0.4);
+                        liveStarted = true;
+                        log(`live start: buffered=${(end-start).toFixed(2)}s, seek -> ${target.toFixed(3)}`);
+                        try { v.currentTime = target; } catch(e){}
+                        try { v.playbackRate = 1.0; } catch(e){}
+                        v.play().catch(()=>{});
+                    }
+                    // 预缓冲未满：继续攒，先做窗口修剪后返回，不进入追尾逻辑
+                    if (!liveStarted) {
+                        if (end - start > 8) { try { sb.remove(start, end - 4); } catch(e){} }
+                        pump();
+                        return;
+                    }
+                }
                 // 1) 修剪兜底：currentTime 已落到被 sb.remove 切掉的旧区段 → 跳到 buffered 头
                 if (v.currentTime < start - 0.5) {
                     log('seek live: ' + v.currentTime.toFixed(3) + ' -> ' + start.toFixed(3));
@@ -611,12 +695,24 @@
                 //      0.15~0.6 之间为迟滞区，保持当前速度不抖动
                 else {
                     const lag = end - v.currentTime;
-                    if (lag > 4) {
-                        const target = end - 0.15;
+                    // 分级追尾：尽量用倍速平滑追，硬 seek 只作为"积压过大"的最后手段
+                    // （硬 seek 会重置解码器，造成可见卡顿/花屏，是体感卡顿的主因之一）。
+                    //   lag > 8s        → 积压过大（长时间后台回来），硬 seek 拉平
+                    //   lag > 2s        → 1.3x 快追
+                    //   lag > 0.6s      → 1.1x 平滑追
+                    //   lag <= 0.15s    → 恢复 1.0x
+                    //   中间区为迟滞带，保持当前速度不抖动
+                    if (lag > 8) {
+                        const target = end - 0.3;
                         log(`live tail seek(big lag): ${v.currentTime.toFixed(3)} -> ${target.toFixed(3)} (lag=${lag.toFixed(2)}s)`);
                         try { v.currentTime = target; } catch(e){}
                         if (v.playbackRate !== 1.0) v.playbackRate = 1.0;
                         v.play().catch(()=>{});
+                    } else if (lag > 2) {
+                        if (v.playbackRate !== 1.3) {
+                            v.playbackRate = 1.3;
+                            log(`live tail speed-up 1.3x (lag=${lag.toFixed(2)}s)`);
+                        }
                     } else if (lag > 0.6) {
                         if (v.playbackRate !== 1.1) {
                             v.playbackRate = 1.1;
@@ -629,11 +725,10 @@
                         }
                     }
                 }
-                // 3) 缓冲窗口压缩：原 30s/10s 是录像 / VOD 思路，直播完全用不到那么多。
-                //    end-start > 8s 就把头部修剪到只剩 4s，进一步压缩 SourceBuffer 内
-                //    "可回看历史" 的体积，避免长时间运行后 buffered 堆到几十秒+。
-                if (end - start > 8) {
-                    try { sb.remove(start, end - 4); } catch(e){}
+                // 3) 缓冲窗口压缩：直播不需要长历史，但留太薄(4s)抗抖动差、易触发追尾硬 seek。
+                //    end-start > 12s 才修剪到留 6s，给网络抖动留足缓冲余量。
+                if (end - start > 12) {
+                    try { sb.remove(start, end - 6); } catch(e){}
                 }
             }
             pump();
@@ -644,6 +739,8 @@
     function startLive() {
         if (ws) { log('已经在连接中'); return; }
         gotInit = false; queue = [];
+        liveStarted = false;   // 复位起播门槛：本轮重新走预缓冲再起播
+        tsOffsetSet = false;   // 复位时间戳偏移：本轮重新按首片 tfdt 拉回 0
         try { v.playbackRate = 1.0; } catch(e){}   // 复位上一轮残留的追尾倍速
         ms = new MediaSource();
         v.src = URL.createObjectURL(ms);
@@ -667,10 +764,9 @@
             }
             queue.push(buf);
             pump();
-            // 首屏起播提速：MSE 默认会攒 2-5 个 fragment 才自动开播，黑屏明显。
-            // 收到数据就主动 play()，让浏览器一拿到可解码帧立刻出画。muted 状态下
-            // 自动播放策略允许，play() 不会被拦。
-            v.play().catch(()=>{});
+            // 起播由 attachSb 的 updateend 水位逻辑驱动（攒够 LIVE_START_BUFFER 秒
+            // 再 seek 到末端并 play），不在这里"收到一片就 play"——否则只缓冲 1 片
+            // (≈1s) 就贴着 buffered 末端播，readyState 立刻不足，表现为卡首帧。
         };
         ws.onclose = () => { log('WebSocket 关闭'); setStat('已断开'); ws = null; };
         ws.onerror = () => log('WebSocket 错误');
@@ -679,7 +775,7 @@
         if (ws) { ws.close(); ws = null; }
         try { v.pause(); } catch(e){}
         v.removeAttribute('src'); v.load();
-        ms = null; sb = null; queue = []; gotInit = false;
+        ms = null; sb = null; queue = []; gotInit = false; liveStarted = false; tsOffsetSet = false;
         setStat('已停止');
     }
     btnS.onclick  = () => { liveWanted = true;  startLive(); };
@@ -720,7 +816,9 @@
         if (!sb || sb.updating || !v) return;
         if (!sb.buffered || sb.buffered.length === 0) return;
         const end = sb.buffered.end(sb.buffered.length - 1);
-        if (end - (v.currentTime || 0) > 1.0) {
+        // 仅当积压较大（>3s，典型为长时间后台回来）才硬 seek 抹平；小幅落后交给
+        // updateend 的倍速追尾平滑处理，避免每次切回前台都硬 seek 造成可见卡顿。
+        if (end - (v.currentTime || 0) > 3.0) {
             const target = end - 0.3;
             log(`live tail catch-up (${why}): ${(v.currentTime||0).toFixed(3)} -> ${target.toFixed(3)}`);
             try { v.currentTime = target; } catch(e){}
