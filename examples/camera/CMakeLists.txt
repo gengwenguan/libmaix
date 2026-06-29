@@ -41,36 +41,33 @@ project(${PROJECT_NAME})
 # ----------------------------------------------------------------------
 # 拷贝前端资源到 dist/web/
 # 约定：
-#   examples/camera/web_player.html  →  dist/web/index.html
-#   examples/camera/favicon.ico      →  dist/web/favicon.ico
-#   将来要拆 app.js / style.css，往 examples/camera/web/ 下放即可
-#   （如果以后 web/ 目录存在，会整目录复制；目前只有单文件，先按文件复制）
+#   examples/camera/web/  →  dist/web/ （整目录复制）
+# 新增 web 资源（style.css、app.js 等）直接放到 web/ 目录下即可，
+# CMake 会自动检测并复制。
 # 设备端运行时由 httpServer 通过 /proc/self/exe 解析自身目录、
 # 读取 <exe_dir>/web/index.html。
 # ----------------------------------------------------------------------
-set(_web_src_html "${CMAKE_CURRENT_LIST_DIR}/web_player.html")
-set(_web_src_favicon "${CMAKE_CURRENT_LIST_DIR}/favicon.ico")
-set(_web_dst_dir  "${PROJECT_DIST_DIR}/web")
-set(_web_dst_html "${_web_dst_dir}/index.html")
-set(_web_dst_favicon "${_web_dst_dir}/favicon.ico")
-if(EXISTS "${_web_src_html}")
-    # 旧实现用 add_custom_command(TARGET ... POST_BUILD)，
-    # 只在 camera 目标真正链接时才触发。当只改 web_player.html 而 C++ 源没变时，
-    # camera 不会被重新链接，POST_BUILD 不跑，dist/web/index.html 永远是旧的。
-    # 改为独立 custom_command + custom_target，让它依赖源 html，
-    # 源文件 mtime 一变 → dist 文件被重生成，且 ALL 模式确保每次 build 都检查。
-    add_custom_command(
-        OUTPUT  "${_web_dst_html}" "${_web_dst_favicon}"
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${_web_dst_dir}"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${_web_src_html}" "${_web_dst_html}"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${_web_src_favicon}" "${_web_dst_favicon}"
-        DEPENDS "${_web_src_html}" "${_web_src_favicon}"
-        COMMENT "-- copy web assets to ${_web_dst_html}"
-    )
-    add_custom_target(copy_web_assets ALL DEPENDS "${_web_dst_html}" "${_web_dst_favicon}")
-    add_dependencies(${PROJECT_NAME} copy_web_assets)
+set(_web_src_dir "${CMAKE_CURRENT_LIST_DIR}/web")
+set(_web_dst_dir "${PROJECT_DIST_DIR}/web")
+if(EXISTS "${_web_src_dir}")
+    file(GLOB_RECURSE _web_src_files "${_web_src_dir}/*")
+    if(_web_src_files)
+        set(_web_dst_files)
+        foreach(_src_file ${_web_src_files})
+            file(RELATIVE_PATH _rel_path "${_web_src_dir}" "${_src_file}")
+            set(_dst_file "${_web_dst_dir}/${_rel_path}")
+            list(APPEND _web_dst_files "${_dst_file}")
+            add_custom_command(
+                OUTPUT  "${_dst_file}"
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${_web_dst_dir}"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_src_file}" "${_dst_file}"
+                DEPENDS "${_src_file}"
+                COMMENT "-- copy web asset ${_rel_path}"
+            )
+        endforeach()
+        add_custom_target(copy_web_assets ALL DEPENDS ${_web_dst_files})
+        add_dependencies(${PROJECT_NAME} copy_web_assets)
+    endif()
 endif()
 
 # ----------------------------------------------------------------------

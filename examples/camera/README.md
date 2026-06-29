@@ -34,6 +34,7 @@ Web 配置中心。
 camera/
 ├── main/
 │   ├── CMakeLists.txt
+│   ├── dep/                       # 预编译依赖（FFmpeg / x264 / opus / OpenSSL / ALSA / 编解码）
 │   └── src/
 │       ├── main.cpp               # 进程入口；管理 cam0 / cam1 / vo / Terminal 生命周期
 │       ├── terminal/              # 顶层调度器（聚合所有子模块、注册 HTTP API）
@@ -43,7 +44,7 @@ camera/
 │       ├── liveHub/               # fMP4 fragment 的 pub/sub 中枢
 │       ├── recorder/              # 滚动录像 + RecordCleaner 双兜底清理 + .idx 精准索引
 │       ├── snapshot/              # JPEG 抓拍 + 相册（原子位 fast-path）
-│       ├── personDetector/        # YOLOv2 awnn 人形识别（cam1 注入）
+│       ├── personDetector/        # YOLOv2 person_int8 人形识别（cam1 注入）
 │       ├── motionDetector/        # 帧间差分移动侦测（cam0 NV21，与 AI 平行的拍照触发器）
 │       ├── httpServer/            # 多线程 HTTP/HTTPS（Range/206 流式）
 │       ├── websocketServer/       # WS/WSS 服务（直播 / 回放 / 对讲）
@@ -51,11 +52,17 @@ camera/
 │       ├── talkPlayer/            # OPUS → ALSA 单向对讲播放器
 │       ├── appConfig/             # 单例配置 + JSON 持久化（pull-on-demand 读取）
 │       └── utilTools/             # 日志、SPS 解析、shell 调试工具
-├── dep/                           # 预编译依赖（FFmpeg / x264 / opus / OpenSSL / ALSA / 编解码）
-├── person/                        # YOLOv2 awnn 模型（推到 /root/models/）
-├── web_player.html                # 单页前端（直播 + 回放 + 对讲 + 配置）
-├── webcodecs_test.html            # WebCodecs 验证页
-├── sync.sh / scppush.sh / buildpush.sh   # Mac → 编译机 → 板子 自动化脚本
+├── person/                        # YOLOv2 person_int8 模型（推到 /root/models/）
+├── web/                           # 前端资源（index.html / favicon.ico / css/js）
+│   ├── index.html                 # 单页前端（直播 + 回放 + 对讲 + 配置）
+│   └── favicon.ico
+├── prompt/                        # 提示音资源（POST /api/prompt 播放）
+│   └── door.wav
+├── cert/                          # TLS 自签名证书（server.crt / server.key）
+├── sync.sh                        # Mac → 编译机 → 板子 自动化部署脚本
+├── scppush.sh                     # 备用：直接 scp 推产物到板子
+├── debugcore.sh                   # 拉取板上 core 文件 + 交叉 gdb 调试
+├── mem_watchdog.sh                # 内存看门狗（VmData>80MB 自动重启，应对闭源库慢泄漏）
 ├── project.py                     # libmaix 工程编译入口
 └── README.md
 ```
@@ -144,6 +151,7 @@ PersonDetector 只"使用"该 cam，不 own，main 负责 destroy。
 | GET | `/api/photo/latest`    | 获取最新一张抓拍照片元信息 |
 | GET | `/api/photo/list`      | 抓拍相册列表 |
 | GET | `/photo/<name>.jpg`    | 单张抓拍下载 |
+| POST| `/api/photo/delete`    | body `{names:[...]}` 或 `{name:"x.jpg"}`：批量/单张删除抓拍 |
 | POST| `/api/snapshot`        | 立即拍一张 |
 | POST| `/api/prompt`          | body `{name:"door"}`：同步播放 `<exeDir>/prompt/<name>.wav`（详见 §5.3） |
 | GET | `/api/config`          | 当前 AppConfig snapshot（JSON） |
@@ -155,182 +163,95 @@ PersonDetector 只"使用"该 cam，不 own，main 负责 destroy。
 ### 5.1 回放精准跳转：`.idx` sidecar + HTTP Range
 
 老的"整文件 fmp4"回放在 MSE 端只能从头解析才能得到帧位置，拖动进度条会
-重新拉一大段字节、整页闪烁、卡顿明显。本项目用 `.idx` 伴生 JSON 让前端
-"看一眼索引就知道目标 fragment 在文件里的字节区间"，从而做到毫秒级跳转：
+重新拉一大段字节、整页闪烁。本项目用 `.idx` 伴生 JSON 让前端"看一眼索引就知道
+目标 fragment 在文件里的字节区间"，从而做到毫秒级跳转。
 
 **录制端**：[recorder.cpp](file:///Users/bytedance/work/libmaix/examples/camera/main/src/recorder/recorder.cpp)
-每写一个 mp4 同时维护一份 `<name>.mp4.idx`，结构非常朴素：
+每写一个 mp4 同时维护一份 `<name>.mp4.idx`：
 
 ```json
 {
-  "v": 1,
-  "ts": 90000,
-  "init": 1248,                       // ftyp + moov 总字节数（init segment 大小）
-  "frags": [
-    [0, 1248, 12345],                 // [tfdt(90kHz), byte_offset, size]
-    [180000, 13593, 12010],
-    [360000, 25603, 11888]
-  ]
+  "v": 1, "ts": 90000, "init": 1248,    // init = ftyp+moov 字节数
+  "frags": [ [0, 1248, 12345], ... ]    // 每项 [tfdt(90kHz), byte_offset, size]
 }
 ```
 
-每片 mp4 的 tfdt 时基都从 0 开始（落盘时由 `RewriteTfdtInPlace_locked` 重写），
-因此 `.idx` 里的 `tfdt` 等同于"自该片起播以来的播放时间 × ts"，前端做时间→fragment
-映射只需一次 lower_bound。
+每片 mp4 的 tfdt 时基落盘时由 `RewriteTfdtInPlace_locked` 重写为从 0 开始，
+前端做时间→fragment 映射只需一次 lower_bound。`RecordCleaner` 删 mp4 时同步
+`unlink` 同名 `.idx`。
 
-**清理**：`RecordCleaner` 清理过期目录或超容量删 mp4 时，会同时 `unlink` 同名 `.mp4.idx`。
+**回放端**（[web/index.html](file:///Users/bytedance/work/libmaix/examples/camera/web/index.html)）：首次 GET `.idx`（几 KB），之后每次 seek：
 
-**回放端**：[web_player.html](file:///Users/bytedance/work/libmaix/examples/camera/web_player.html)
-首次加载该片时一次 GET `.mp4.idx`（几 KB，瞬时返回）。之后每次 seek：
+1. 目标仍在 `SourceBuffer.buffered` 内 → 直接 `currentTime = t`，不发请求
+2. 否则按 `.idx` 定位目标 fragment 的 `[off, off+size)`，单次 `Range` 拉回 append
+3. 全程不重建 `<video>` 元素，无视口闪烁；`sb.mode='segments'` 按 tfdt 自动归位，
+   向前/向后拖动都能毫秒级落点
 
-1. 若目标位置仍在已 append 的 SourceBuffer 范围内 → 直接 `video.currentTime = t` 不发请求
-2. 否则按 `.idx` 找到目标 fragment 的 `[off, off+size)` → `Range: bytes=0-init-1` 拉 init seg
-   （只第一次）+ `Range: bytes=off-(off+size-1)` 拉单个 fragment → `appendBuffer`
-3. 整个过程不再重置 `<video>` 元素，CSS 已锁定容器尺寸，无视口闪烁
+**`mediaSource.duration` 即时锁定**：init seg append 完后立刻按 `.idx` 估算总时长
+（`tfdt(last)/ts + 末段时长`）写入 `duration`，slider 立即可拖；idx 快路径不调
+`endOfStream()`，让 MediaSource 全程保持 `open`。
 
-**`mediaSource.duration` 即时锁定**：原生 `<video>` 控件只有在 `duration` 是有限正数
-时才会渲染总时长 + 启用进度条拖动。原始流程依赖"流式 append 到 EOF → endOfStream → MSE
-自动算出 duration"，30 分钟一片在 1MB/s 上行带宽下要 30~60s 才结束，整段时间 slider 拖不动。
-现在 init seg append 完后立刻按 `.idx` 估算总时长（`tfdt(last)/ts + 末段时长`）写到
-`mediaSource.duration`，浏览器毫秒级拿到有限的总时长，slider 立即可拖。
-为避免覆盖该值，idx 快路径不再调 `endOfStream()`，让 ms 全程保持 `open`。
-
-**双向拖动**：精准跳转后只 append 了 `[fi, last]` 的字节，进度条向前拖到 `t < tfdt(fi)`
-时目标不在 `SourceBuffer.buffered` 内，MSE 自身不会主动发请求（这是 `<video>` 的"哑"
-seek 行为）。前端额外监听 `video.seeking` 事件，发现目标缺字节就用 `.idx` 定位前向缺口
-`[fi'.off, fi.off-1]`，单次 Range 请求拉回来 append（`sb.mode='segments'` 会按 tfdt 自动归位），
-再把 `currentTime` 重置一次让 video 命中——同样不重建 SourceBuffer / `<video>` 元素，
-向前拖动也能毫秒级落点。
-
-服务端配合：[httpServer](file:///Users/bytedance/work/libmaix/examples/camera/main/src/httpServer)
-对所有 `filePath` 响应都解析 `Range:` 头返回 206，配合内核 `sendfile`/分块 `read+send`
-保持 64KB 滚动缓冲。
-
-> 旧版"整文件下载、客户端自己 demux"仍然兼容（无 `.idx` 时前端走老分支），
-> 这也是为什么改造可以平滑铺设到既存录像目录上。
+服务端 [httpServer](file:///Users/bytedance/work/libmaix/examples/camera/main/src/httpServer)
+对所有 `filePath` 响应解析 `Range:` 头返回 206，保持 64KB 滚动缓冲。
+无 `.idx` 时前端自动回退到"整文件下载"老分支，可平滑铺设到既存录像目录上。
 
 ### 5.2 仅音频直播：`/ws/audio`（省带宽方案）
 
-完整 fMP4 直播在 30FPS / VBR 5Mbps 下的实际下行约 **1~2 Mbps**。
-当用户只想"听"现场（例如锁屏后台监听、车载弱网、流量计费场景）时，
-完全没必要把视频字节也拉下来。为此服务端额外暴露一条独立的 WebSocket
-路径 `/ws/audio`，**只推 AAC 音频**，下行带宽降到 **~64 kbps（AAC 码率本身）**。
+完整 fMP4 直播实际下行约 **1~2 Mbps**。当用户只想"听"现场（锁屏后台监听、
+弱网、流量计费场景）时，服务端额外暴露一条独立 WebSocket 路径 `/ws/audio`，
+**只推 ADTS AAC**，下行带宽降到 **~64 kbps**。
 
-#### 服务端链路
+**服务端**（[websocketServer.cpp](file:///Users/bytedance/work/libmaix/examples/camera/main/src/websocketServer/websocketServer.cpp)）：
+复用同一个 `C_WebSocketServer`（8081/8444），视频路径 `BroadcastBinary` 跳过
+`/ws/audio` 客户端，新增 `BroadcastAudioBinary` 只向 `/ws/audio` 发包。帧来源在
+[terminal.cpp::OnOutputAac](file:///Users/bytedance/work/libmaix/examples/camera/main/src/terminal/terminal.cpp)
+——每帧 raw AAC 加 7 字节 ADTS 头后广播，**不依赖 muxer / 首个 IDR**，
+视频通路尚未就绪时也能听到声音。
 
-- 复用同一个 `C_WebSocketServer`（端口 8081 / 8444），不新增端口。
-- 路径派发：[websocketServer.cpp](file:///Users/bytedance/work/libmaix/examples/camera/main/src/websocketServer/websocketServer.cpp)
-  - `BroadcastBinary`（fmp4 视频路径）**跳过** `urlPath == "/ws/audio"` 的客户端
-  - 新增 [`BroadcastAudioBinary`](file:///Users/bytedance/work/libmaix/examples/camera/main/src/websocketServer/websocketServer.cpp)：**只**向 `/ws/audio` 客户端发包
-  - 握手成功时：`/ws/audio` 客户端**不下发** fmp4 init segment（拿到也没用）
-- 帧来源：[terminal.cpp::OnOutputAac](file:///Users/bytedance/work/libmaix/examples/camera/main/src/terminal/terminal.cpp)
-  在每帧 raw AAC 出来后，先用 `BuildAdtsFrame` 加 7 字节 ADTS 头，再调
-  `m_pWsServer->BroadcastAudioBinary(...)`。
-  - 这条路径**不依赖 muxer / 是否拿到首个 IDR**——只要 `aacEnc` 出帧就立即广播。
-    所以浏览器端"仅音频模式"在视频通路尚未就绪时也能听到声音。
-  - ADTS 头各字段从 `m_pAacEnc->SampleRate() / Channels()` 现取，与 `aacEnc` 内部
-    的 dump 路径完全一致。
-
-#### 浏览器端
-
-[web_player.html](file:///Users/bytedance/work/libmaix/examples/camera/web_player.html) 顶栏新增 `🎧 仅音频` 按钮：
-
-- 点击后 `stopLive()` 释放 fmp4 / MSE，再连 `ws(s)://host:8081|8444/ws/audio`
-- 接到二进制帧后用 `AudioContext.decodeAudioData` 直接解 ADTS（Chrome / Edge / Firefox / Safari 原生支持）
-- 用单调递增的 `audioPlayHead` 调度 `BufferSource.start(t)`，落后超 1.2s 自动追到 `now+50ms`
-- 背压保护：同时排队 decode > 12 帧（约 256ms × 12）就丢一帧，避免 GC 抖动
-- Safari/iOS：必须用户手势触发 `audioCtx.resume()`，因此固定走 `btnAudioOnly.onclick`
-
-#### 与视频直播 / 对讲的关系
+**浏览器端**（[web/index.html](file:///Users/bytedance/work/libmaix/examples/camera/web/index.html) 顶栏 `🎧 仅音频` 按钮）：
+`stopLive()` 释放 MSE 后连 `/ws/audio`，用 `AudioContext.decodeAudioData` 解 ADTS，
+单调递增的 `audioPlayHead` 调度播放，落后超 1.2s 自动追帧，排队 >12 帧丢一帧防抖动。
+Safari/iOS 需用户手势触发 `audioCtx.resume()`。
 
 | 维度 | `/ws/live` (fmp4) | `/ws/audio` (ADTS AAC) |
 |---|---|---|
 | 下行带宽 | ~1-2 Mbps | ~64 kbps |
 | 解码栈 | MSE + `<video>` | Web Audio API |
 | 起播延迟 | 等首个 IDR | 立即（ALSA 出帧即广播） |
-| 互斥 | 与 `/ws/audio` 互斥 | 进入仅音频时自动 `stopLive()` |
-| 入流 | `Recorder + LiveHub.OnLiveFragment` | `BroadcastAudioBinary` 旁路 |
+| 互斥 | 进入仅音频时自动 `stopLive()` | 与视频直播互斥 |
 
-> **单一编码源**：板上始终只跑一份 H264 + 一份 AAC 编码，无论几个客户端订阅
-> 视频/音频流——这一点和视频直播保持一致，64MB 板子才扛得住。
-
+> **单一编码源**：板上始终只跑一份 H264 + 一份 AAC 编码，无论几个客户端订阅，
+> 64MB 板子才扛得住。
 
 ---
 
 ### 5.3 板上提示音播放：`POST /api/prompt`
 
-需求场景：web 端点一下"放门口"按钮，开发板扬声器立即播一段固定提示音
-（典型用途：外卖配送提示、欢迎语、告警语）。
+web 端点一下"放门口"按钮，开发板扬声器立即播一段固定提示音（外卖配送提示、
+欢迎语、告警语等）。链路：`POST /api/prompt {name:"door"}` →
+[terminal.cpp](file:///Users/bytedance/work/libmaix/examples/camera/main/src/terminal/terminal.cpp)
+校验白名单（`name` 仅 `[A-Za-z0-9_-]`）+ 拼路径 `<exeDir>/prompt/<name>.wav` →
+[C_TalkPlayer::PlayWavSync](file:///Users/bytedance/work/libmaix/examples/camera/main/src/talkPlayer/talkPlayer.cpp)
+同步播放（阻塞约等于 wav 时长）→ ALSA 内置扬声器。
 
-#### 链路
+**与对讲共存**：ALSA `default` 在 V831 上独占，TalkPlayer 既管对讲也管提示音——
+`m_pcmMtx` 序列化 talk 解码线程与 prompt 的写入，`m_promptBusy` CAS 保证同时只播一段
+（重叠请求返回 409）；talk 不在线时 prompt 临时打开 ALSA、播完归还。
 
-```
-[Web 端] 🔔 放门口 button
-    │  POST /api/prompt   body: {"name":"door"}
-    ▼
-[HTTP 工作线程] terminal.cpp ──校验白名单(name 仅 [A-Za-z0-9_-])
-    │                     ──拼路径 <exeDir>/prompt/<name>.wav
-    │                     ──stat 文件存在 → 估算 duration_ms
-    ▼
-[C_TalkPlayer::PlayWavSync(path)] talkPlayer.cpp
-    │  1. m_promptBusy CAS true     （重叠请求 → -3 → HTTP 409 busy）
-    │  2. 一次性读 wav 入内存（≤8MB 上限）
-    │  3. 解析 RIFF/WAVE：要求 PCM/48kHz/16bit/mono（其它格式 → -1 → HTTP 500）
-    │  4. 若 m_pcm 未打开（没有 talk 客户端在线）→ EnsureAlsa_locked
-    │  5. AlsaWrite 写 data 子块（受 m_pcmMtx 保护，与 talk 解码线程串行）
-    │  6. snd_pcm_drain 等待播完
-    │  7. 临时打开的 m_pcm 在播完后归还（前提：talk 仍未上线）
-    ▼
-[ALSA default] V831 内置扬声器
-```
-
-#### 资源管理（与对讲共存）
-
-ALSA `default` 设备在 V831 上**独占**，整个工程对它只允许一条打开路径。
-做法：
-
-- **TalkPlayer 既管对讲、也管提示音**：第一个 `/ws/talk` 连入打开 ALSA，最后一个
-  断开时按需释放；提示音播放复用同一 `m_pcm`。
-- **m_pcmMtx 序列化两路写入**：talk 解码线程和 prompt 同步路径都在 period 粒度
-  交替提交，等价于"先到先服务"的简易 mixer。
-- **m_promptBusy CAS 守护并发**：同时只允许一段提示音在播，重叠请求直接 409
-  避免噪声叠加 / underrun。
-- **Shutdown 在 prompt 进行时跳过 close**：talk 客户端最后一个断开时若
-  `m_promptBusy==true`，保留 m_pcm 让提示音播完，由 PlayWavSync 末尾收尾。
-
-#### wav 文件部署
-
-```
-examples/camera/door.wav         ← 源文件（已纳入 git）
-       │
-       │  CMake copy_prompt_assets target  (file(GLOB) 整目录扫，新增 wav 不必改 CMake)
-       ▼
-dist/camera/prompt/door.wav      ← buildpush.sh 推到板子
-       │
-       ▼
-/root/maix_dist/prompt/door.wav  ← C_TalkPlayer::PlayWavSync 加载
-```
-
-**格式约束（第一版严格校验）**：必须是 `PCM(format=1) / 48000Hz / 16-bit / 1ch`。
-不匹配返回 -1 / HTTP 500。新增提示音时，先用 ffmpeg 转码：
+**wav 部署**：源文件放 `examples/camera/prompt/*.wav`（已纳入 git），CMake
+`copy_prompt_assets` 整目录扫到 `dist/prompt/`，随 `sync.sh push` 推到
+`/root/maix_dist/prompt/`。格式必须是 `PCM / 48000Hz / 16-bit / mono`，否则返回 HTTP 500。
+新增提示音先转码再放进 `prompt/`：
 
 ```bash
-ffmpeg -i in.wav -ar 48000 -ac 1 -sample_fmt s16 examples/camera/welcome.wav
+ffmpeg -i in.wav -ar 48000 -ac 1 -sample_fmt s16 examples/camera/prompt/welcome.wav
 ```
 
-后端代码无需任何改动，新文件随 buildpush.sh 一起部署即可，前端通过
-`POST /api/prompt {name:"welcome"}` 触发（注意：前端按钮目前只硬编码了
-"door"，添加新提示音时需要在 web_player.html 里加一个对应按钮）。
+后端无需改动，但前端按钮目前硬编码 `door`，新增提示音需在
+[web/index.html](file:///Users/bytedance/work/libmaix/examples/camera/web/index.html) 里加对应按钮。
 
-#### HTTP 响应码
-
-| 状态 | body | 触发条件 |
-|---|---|---|
-| 200 | `{ok:true, name, duration_ms}` | 正常播放完成 |
-| 400 | `{ok:false, err:"missing name"}` 或 `bad name` | 字段缺失 / 包含非白名单字符 |
-| 404 | `{ok:false, err:"not found"}` | wav 文件不存在 |
-| 409 | `{ok:false, err:"busy"}` | 另一段提示音正在播 |
-| 500 | `{ok:false, err:"play failed"}` | wav 格式不符 / ALSA 错误 |
+**HTTP 响应码**：`200`（含 `duration_ms`）/ `400`（缺字段或非法 name）/
+`404`（文件不存在）/ `409`（busy）/ `500`（格式不符或 ALSA 错误）。
 
 ---
 
@@ -376,6 +297,7 @@ ffmpeg -i in.wav -ar 48000 -ac 1 -sample_fmt s16 examples/camera/welcome.wav
 | `vmd_check_fps` | `5` | 每秒做几次差分判定（1 ~ 30），越高响应越快但 CPU 越费 |
 | `album_max_photos` | `1000` | 相册超限按 mtime 删最老 |
 | `photo_jpeg_qual` | `88` | JPEG 编码质量（50 ~ 95） |
+| `mic_filter_mode` | `0` | 麦克风滤波：0=关闭 / 1=均衡 / 2=激进 / 3=精细 / 4=极激进 / 5=均衡+噪声门 |
 | `osd_show_ip` / `osd_show_time` / `osd_show_ai_box` | `true` | OSD 显示开关 |
 
 仅以下环境变量保留为调试旁路：`AAC_DUMP_PATH`（导出原始 AAC 流到 `/tmp/test.aac`）。
@@ -404,10 +326,13 @@ ffmpeg -i in.wav -ar 48000 -ac 1 -sample_fmt s16 examples/camera/welcome.wav
 工程通过本地 → 编译机 → 开发板 三段式分发：
 
 ```
-Mac (你)                ──rsync──>  192.168.1.10 (编译机)         ──scp──>  192.168.1.28 (M2dock)
+Mac (本地)              ──rsync──>  编译机                      ──scp──>  M2dock 开发板
 ~/work/libmaix          ─────────>   /root/work/libmaix          ────────>  /root/maix_dist
                                      python3 project.py build              start_app.sh
 ```
+
+> 编译机 / 开发板的实际地址在 [sync.sh](file:///Users/bytedance/work/libmaix/examples/camera/sync.sh)
+> 顶部 `BUILD_HOST` / `DEVICE_HOST` 配置（支持 IPv4 / IPv6 字面量）。
 
 ### 常用命令（[`sync.sh`](file:///Users/bytedance/work/libmaix/examples/camera/sync.sh)）
 
@@ -429,9 +354,9 @@ Mac (你)                ──rsync──>  192.168.1.10 (编译机)         �
 - 依赖动态库：`/root/maix_dist/lib/`（启动脚本会 `LD_LIBRARY_PATH` 注入）
 - 录像目录：`<exeDir>/record/<YYYYMMDD>/<HHMMSS>.mp4`
 - 抓拍目录：`<exeDir>/snapshot/`
-- 模型目录：`/root/models/awnn_yolo_person.{bin,param}`（缺失时 AI 模块不致命）
+- 模型目录：`/root/models/person_int8.{bin,param}`（缺失时 AI 模块不致命）
 - 证书目录：`<exeDir>/cert/server.{crt,key}`（缺失时降级 HTTP/WS 明文）
-- 前端文件：`<exeDir>/web/index.html`（CMake 把 `web_player.html` 复制过去）
+- 前端文件：`<exeDir>/web/index.html`（CMake 把 `web/` 整目录复制过去）
 
 ---
 
@@ -472,23 +397,114 @@ Mac (你)                ──rsync──>  192.168.1.10 (编译机)         �
 
 ---
 
-## 11. 已知问题 / TODO
+## 11. 直播稳定性优化
 
-| 编号 | 问题 | 详情见"优化分析" |
+fMP4 over WebSocket 直播在长时间运行和弱网环境下面临几类典型问题，
+本项目做了三层针对性优化。
+
+### 11.1 预缓冲起播（解决首帧卡顿）
+
+**问题**：新客户端刚连上时，只收到 1 个 fragment 就调用 `video.play()`，
+`readyState` 不足，画面卡在首帧不动或频繁缓冲。
+
+**方案**：前端设置 `LIVE_START_BUFFER = 1.6s` 起播水位，
+收满约 1.6 秒的 fragment 后再调用 `play()`，保证有足够的解码缓冲打底。
+
+相关代码见 [web/index.html](file:///Users/bytedance/work/libmaix/examples/camera/web/index.html)
+的 `liveStarted` 标志和 `pump()` 中的起播判定。
+
+### 11.2 分级倍速追尾（解决延迟累积）
+
+**问题**：直播播放速率 ≈ 实时速率，任何网络抖动都会让播放点逐渐落后于
+直播源，延迟从几百毫秒累积到几秒甚至几十秒。
+
+**方案**：三级追尾策略，平滑追上不突兀：
+
+| 延迟区间 | 策略 | 说明 |
 |---|---|---|
-| C1 | `main.cpp:192` `-Wmisleading-indentation` 告警 | `if x1 < 0; if y1 < 0;` 同行 |
-| B1 | TLS 握手在 accept 线程 | 影响多 HTTPS 客户端接入延迟 |
-| A1 | 每个 HTTP 连接 8MB 栈的线程 | 改线程池或缩栈到 256KB |
-| A2 | `InputRgb888` / `rgb888ToNv21` / `m_pNv12Buff` 死代码 | 仅被 `#if 0` 旧路径引用 |
-| A3 | `SimpleSHA1` / `SimpleBase64` 自实现 | OpenSSL 已链接，可换 `SHA1()` |
-| C2 | `sleep_for(8s)` 等 IP / NTP | 改循环检测 + 可中断 |
+| < 1s | 正常 1.0x | 不追，保持观感流畅 |
+| 1s ~ 2s | 1.1x 慢追 | 轻微加速，观众几乎无感 |
+| 2s ~ 8s | 1.3x 中速追 | 明显加速但可接受 |
+| > 8s | 硬 seek 到 live 边缘 | 直接跳转到最新关键帧（极端情况兜底） |
+
+同时把 MSE 缓冲窗口放宽到 6s，给追尾留出操作空间。
+页面可见时追尾更积极（阈值 1s），后台/不可见时放宽到 3s 避免频繁调整。
+
+### 11.3 大 PTS 累积修复（方案 C：timestampOffset 归零）
+
+**问题**：服务端 fMP4 的 PTS 来自 `C_TimeBase::NowUs()` 单调时钟，
+板子长时间运行（50+ 小时）后 PTS 累积到 19 万秒。新客户端接入时
+MSE 的解码基准时间轴错位（`currentTime` 从十几万秒开始），
+导致首帧定格、进度条异常、`buffered` 范围巨大无法正常播放。
+
+**方案**：前端在 append 首个 media fragment 前，解析 fMP4 moof/traf/tfdt box
+拿到 `baseMediaDecodeTime`，然后设置 `SourceBuffer.timestampOffset = -(tfdt / 90000)`，
+把时间轴拉回到 0 点附近。这样无论板子跑了多久，新客户端看到的都是
+从 0 开始的正常时间轴。
+
+关键实现：
+
+- `parseFirstTfdt(arrayBuf)`：递归扫描 MP4 box，定位 `moof → traf → tfdt`，
+  返回 64 位 baseMediaDecodeTime（90kHz 时基）
+- 在 `pump()` 首次 append 前设置 `sb.timestampOffset`
+- `VIDEO_TIMESCALE = 90000` 与服务端 fmp4Muxer 的时基一致
+- 每次重连（`reconnectLive`）时复位 `tsOffsetSet` 标志，重新计算
+
+> 为什么不在服务端重写 tfdt？服务端是单生产者多消费者架构，
+> 重写 tfdt 需要为每个客户端单独维护一份 fragment 拷贝，内存和 CPU 开销
+> 在 64MB 板子上不可接受。方案 C 把计算量全部转移到前端，
+> 服务端零改动，是最经济的解法。
 
 ---
 
-## 12. 依赖与许可
+## 12. 运维工具
+
+### 12.1 内存看门狗 (`mem_watchdog.sh`)
+
+V831 板子上的闭源库（cedar / NPU / FFmpeg 等）存在约 **0.5 MB/h** 的慢泄漏，
+连续运行几天后 VmData 会涨到 60MB+，触发 OOM 被杀。
+为了在修复泄漏之前保证 7×24 稳定运行，配置了内存看门狗：
+
+- **阈值**：VmData > 80 MB 时触发重启
+- **检测间隔**：60 秒
+- **日志**：每 5 分钟打一条 "mem ok" 心跳，异常时打印进程内存快照
+- **日志上限**：2 万行自动截断
+- **时间戳**：北京时间（UTC+8）
+
+部署方式：随 `S02app` 开机自启（`start_app.sh` 拉起 camera 后，
+sleep 30 秒再拉起看门狗）。脚本路径：`/root/maix_dist/mem_watchdog.sh`。
+
+### 12.2 Core 调试 (`debugcore.sh`)
+
+板子进程崩溃产生 core 文件后，用 `debugcore.sh` 一键拉取并启动交叉 gdb：
+
+```bash
+./debugcore.sh          # 拉取 core + run.log → dist/ → 启动 gdb
+./debugcore.sh pull     # 只拉取文件，不启动 gdb
+```
+
+交叉工具链路径默认 `/opt/toolchain-sunxi-musl/`，
+不在该路径时脚本会提示修改 `GDB_TOOLCHAIN` 变量。
+
+---
+
+## 13. 已知问题 / TODO
+
+| 编号 | 问题 | 状态 |
+|---|---|---|
+| C1 | [main.cpp:251](file:///Users/bytedance/work/libmaix/examples/camera/main/src/main.cpp#L251) `if (x1<0)…; if (y1<0)…;` 同行 `-Wmisleading-indentation` 告警 | 待处理（仅告警，不影响运行） |
+| B1 | TLS 握手在 accept 线程，影响多 HTTPS 客户端并发接入延迟 | 待处理 |
+| A1 | 每个 HTTP 连接一个 8MB 栈的线程 | 待处理（可改线程池或缩栈到 256KB） |
+| A2 | `InputRgb888` / `rgb888ToNv21` / `m_pNv12Buff` 死代码 | 待清理（仅被 main.cpp `#if 0` 旧采集路径引用） |
+| A3 | `SimpleSHA1` / `SimpleBase64` 自实现握手摘要 | 待优化（OpenSSL 已链接，可换 `SHA1()`） |
+| C2 | 启动 `sleep_for(8s)` 等 IP / NTP | 待优化（改循环检测 + 可中断） |
+
+---
+
+## 14. 依赖与许可
 
 - **libmaix**：摄像头 / 显示 / VO / NPU 抽象（同仓库根 `components/`）
-- **FFmpeg / x264 / opus**：AAC 编码 + OPUS 解码（`dep/ffmpeg/`）
+- **FFmpeg / x264 / opus**：AAC 编码 + OPUS 解码（`main/dep/ffmpeg/`）
 - **OpenSSL 1.1**：TLS（HTTPS / WSS）+ 自签名证书
 - **OpenCV**：OSD 文字 / JPEG 编码（已由 libmaix 引入）
 - **ALSA**：麦克风采集 + 对讲扬声器播放
