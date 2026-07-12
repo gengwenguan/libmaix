@@ -71,6 +71,23 @@ public:
         bool   osd_show_ip     = true;
         bool   osd_show_time   = true;
         bool   osd_show_ai_box = true;   // 是否在 cam0 画面上叠加 AI 检测框（仅 ai_enabled=true 时有意义）
+
+        // ---- MQTT IPv6 地址上报 ----
+        // 常驻检测本机某网卡的全局 IPv6 地址，变化时通过 MQTT 发布到指定 topic，
+        // 供外部（手机 / 服务器）获取板子的公网 IPv6 直连地址。默认关闭，零开销。
+        bool        mqtt_enabled     = false;             // 总开关，默认关
+        std::string mqtt_broker_host = "broker.emqx.io";  // broker 地址（域名或 IP）
+        int         mqtt_broker_port = 1883;              // 明文 MQTT 端口
+        std::string mqtt_topic       = "cam/ipv6";        // 发布主题
+        std::string mqtt_client_id   = "v831cam";         // 客户端 ID（多设备需区分时改）
+        int         mqtt_poll_sec    = 10;                // IPv6 轮询周期（秒）
+        std::string mqtt_iface       = "wlan0";           // 监测的网卡名
+        // 保活重报周期（秒）：即使地址没变，超过此间隔也强制重报一次（心跳，
+        // 让订阅端感知设备存活、新订阅者能拿到当前地址）。0 = 关闭保活，仅变化时报。
+        int         mqtt_report_interval_s = 3600;        // 默认 1 小时
+        // 是否让 broker 保留消息（retain）：新订阅者一连上即收到最后一次上报的地址。
+        // 对"当前 IPv6"这类状态语义很合适，默认开启。
+        bool        mqtt_retain      = true;
     };
 
 public:

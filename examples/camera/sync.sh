@@ -14,7 +14,7 @@ set -e
 
 # ---------- 配置 ----------
 BUILD_USER="root"
-BUILD_HOST="2409:8a1e:7a54:f240:945f:84d6:7afe:d51b"
+BUILD_HOST="2409:8a1e:7a56:b330:8647:9ff:fe45:35a0"
 BUILD_DIR="/root/work/libmaix/examples/camera"
 
 DEVICE_USER="root"

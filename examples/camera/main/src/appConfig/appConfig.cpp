@@ -132,6 +132,15 @@ std::string C_AppConfig::ToJson(const Snapshot& s)
        << ",\"osd_show_ip\":"      << (s.osd_show_ip   ? "true" : "false")
        << ",\"osd_show_time\":"    << (s.osd_show_time ? "true" : "false")
        << ",\"osd_show_ai_box\":"  << (s.osd_show_ai_box ? "true" : "false")
+       << ",\"mqtt_enabled\":"     << (s.mqtt_enabled ? "true" : "false")
+       << ",\"mqtt_broker_host\":\"" << s.mqtt_broker_host << "\""
+       << ",\"mqtt_broker_port\":" << s.mqtt_broker_port
+       << ",\"mqtt_topic\":\""     << s.mqtt_topic << "\""
+       << ",\"mqtt_client_id\":\"" << s.mqtt_client_id << "\""
+       << ",\"mqtt_poll_sec\":"    << s.mqtt_poll_sec
+       << ",\"mqtt_iface\":\""     << s.mqtt_iface << "\""
+       << ",\"mqtt_report_interval_s\":" << s.mqtt_report_interval_s
+       << ",\"mqtt_retain\":"      << (s.mqtt_retain ? "true" : "false")
        << "}";
     return js.str();
 }
@@ -156,6 +165,15 @@ bool C_AppConfig::AssignKv(Snapshot& s, const std::string& k, const std::string&
     else if (k == "osd_show_ip")        s.osd_show_ip       = StrToBool(v, s.osd_show_ip);
     else if (k == "osd_show_time")      s.osd_show_time     = StrToBool(v, s.osd_show_time);
     else if (k == "osd_show_ai_box")    s.osd_show_ai_box   = StrToBool(v, s.osd_show_ai_box);
+    else if (k == "mqtt_enabled")       s.mqtt_enabled      = StrToBool(v, s.mqtt_enabled);
+    else if (k == "mqtt_broker_host")   s.mqtt_broker_host  = Trim(v);
+    else if (k == "mqtt_broker_port")   s.mqtt_broker_port  = StrToInt(v,  s.mqtt_broker_port);
+    else if (k == "mqtt_topic")         s.mqtt_topic        = Trim(v);
+    else if (k == "mqtt_client_id")     s.mqtt_client_id    = Trim(v);
+    else if (k == "mqtt_poll_sec")      s.mqtt_poll_sec     = StrToInt(v,  s.mqtt_poll_sec);
+    else if (k == "mqtt_iface")         s.mqtt_iface        = Trim(v);
+    else if (k == "mqtt_report_interval_s") s.mqtt_report_interval_s = StrToInt(v, s.mqtt_report_interval_s);
+    else if (k == "mqtt_retain")        s.mqtt_retain       = StrToBool(v, s.mqtt_retain);
     else return false;
     return true;
 }
@@ -177,6 +195,11 @@ void C_AppConfig::ClampSnapshot(Snapshot& s)
     s.vmd_area_ratio     = Clamp(s.vmd_area_ratio,    0.001f, 0.5f);
     s.vmd_min_interval_s = Clamp(s.vmd_min_interval_s,1,      3600);
     s.vmd_check_fps      = Clamp(s.vmd_check_fps,     1,      30);
+    s.mqtt_broker_port   = Clamp(s.mqtt_broker_port,  1,      65535);
+    s.mqtt_poll_sec      = Clamp(s.mqtt_poll_sec,     2,      3600);
+    // 0 = 关闭保活；非 0 时下限 60s（避免误配成几秒频繁重报），上限 24h
+    if (s.mqtt_report_interval_s != 0)
+        s.mqtt_report_interval_s = Clamp(s.mqtt_report_interval_s, 60, 86400);
 }
 
 bool C_AppConfig::LoadFromFile_locked()
@@ -226,7 +249,16 @@ bool C_AppConfig::SaveToFile_locked() const
         << "  \"vmd_check_fps\":      " << m_snap.vmd_check_fps << ",\n"
         << "  \"osd_show_ip\":        " << (m_snap.osd_show_ip   ? "true" : "false") << ",\n"
         << "  \"osd_show_time\":      " << (m_snap.osd_show_time ? "true" : "false") << ",\n"
-        << "  \"osd_show_ai_box\":    " << (m_snap.osd_show_ai_box ? "true" : "false") << "\n"
+        << "  \"osd_show_ai_box\":    " << (m_snap.osd_show_ai_box ? "true" : "false") << ",\n"
+        << "  \"mqtt_enabled\":       " << (m_snap.mqtt_enabled ? "true" : "false") << ",\n"
+        << "  \"mqtt_broker_host\":   \"" << m_snap.mqtt_broker_host << "\",\n"
+        << "  \"mqtt_broker_port\":   " << m_snap.mqtt_broker_port << ",\n"
+        << "  \"mqtt_topic\":         \"" << m_snap.mqtt_topic << "\",\n"
+        << "  \"mqtt_client_id\":     \"" << m_snap.mqtt_client_id << "\",\n"
+        << "  \"mqtt_poll_sec\":      " << m_snap.mqtt_poll_sec << ",\n"
+        << "  \"mqtt_iface\":         \"" << m_snap.mqtt_iface << "\",\n"
+        << "  \"mqtt_report_interval_s\": " << m_snap.mqtt_report_interval_s << ",\n"
+        << "  \"mqtt_retain\":        " << (m_snap.mqtt_retain ? "true" : "false") << "\n"
         << "}\n";
     ofs.close();
     return true;

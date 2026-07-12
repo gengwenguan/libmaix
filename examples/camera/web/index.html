@@ -411,6 +411,63 @@
                 </div>
             </fieldset>
 
+            <fieldset class="cfg-section">
+                <legend>MQTT IPv6 上报（公网 IPv6 变化时推送）</legend>
+                <div class="cfg-row">
+                    <label><input type="checkbox" id="cfg_mqtt_enabled"> 启用 IPv6 地址 MQTT 上报</label>
+                </div>
+                <div class="cfg-row">
+                    <label>Broker 地址
+                        <input type="text" id="cfg_mqtt_broker_host" placeholder="broker.emqx.io">
+                    </label>
+                    <span class="hint-inline">域名 / IPv4 / IPv6 均可</span>
+                </div>
+                <div class="cfg-row">
+                    <label>Broker 端口
+                        <input type="number" id="cfg_mqtt_broker_port" step="1" min="1" max="65535">
+                    </label>
+                    <span class="hint-inline">明文 MQTT 通常 1883</span>
+                </div>
+                <div class="cfg-row">
+                    <label>发布主题
+                        <input type="text" id="cfg_mqtt_topic" placeholder="cam/ipv6">
+                    </label>
+                    <span class="hint-inline">payload 为纯 IPv6 字符串</span>
+                </div>
+                <div class="cfg-row">
+                    <label>Client ID
+                        <input type="text" id="cfg_mqtt_client_id" placeholder="v831cam">
+                    </label>
+                    <span class="hint-inline">同 broker 下多设备需区分</span>
+                </div>
+                <div class="cfg-row">
+                    <label>轮询周期(秒)
+                        <input type="number" id="cfg_mqtt_poll_sec" step="1" min="2" max="3600">
+                    </label>
+                    <span class="hint-inline">检测网卡 IPv6 变化的间隔；默认 10</span>
+                </div>
+                <div class="cfg-row">
+                    <label>监测网卡
+                        <input type="text" id="cfg_mqtt_iface" placeholder="wlan0">
+                    </label>
+                    <span class="hint-inline">取该网卡的全局 IPv6（排除 fe80:: / ::1）</span>
+                </div>
+                <div class="cfg-row">
+                    <label>保活重报周期(秒)
+                        <input type="number" id="cfg_mqtt_report_interval_s" step="60" min="0" max="86400">
+                    </label>
+                    <span class="hint-inline">地址没变也每隔此秒数重报一次（心跳）；默认 3600=1小时；0=关闭仅变化时报</span>
+                </div>
+                <div class="cfg-row">
+                    <label><input type="checkbox" id="cfg_mqtt_retain"> 保留消息(retain)</label>
+                    <span class="hint-inline">开启后新订阅者一连上即收到最后上报的地址；推荐开启</span>
+                </div>
+                <div class="hint">
+                    常驻后台线程按需短连接：仅当网卡全局 IPv6 相较上次变化时才连 broker 发布一次，
+                    publish 完立即断开；地址不变时零网络开销。关闭时线程只空转。
+                </div>
+            </fieldset>
+
             <div class="hint">
                 所有设置即时落盘到 <code>config.json</code>；其中 AI / 相册 / OSD 立即生效，
                 录像分片时长在下次切片时生效（10 分钟内）。
@@ -2473,7 +2530,10 @@
         'cfg_vmd_min_interval_s', 'cfg_vmd_check_fps',
         'cfg_record_segment_s', 'cfg_record_retain_days', 'cfg_record_max_gb',
         'cfg_album_max_photos', 'cfg_photo_jpeg_qual', 'cfg_mic_filter_mode',
-        'cfg_osd_show_ip', 'cfg_osd_show_time', 'cfg_osd_show_ai_box'
+        'cfg_osd_show_ip', 'cfg_osd_show_time', 'cfg_osd_show_ai_box',
+        'cfg_mqtt_enabled', 'cfg_mqtt_broker_host', 'cfg_mqtt_broker_port',
+        'cfg_mqtt_topic', 'cfg_mqtt_client_id', 'cfg_mqtt_poll_sec', 'cfg_mqtt_iface',
+        'cfg_mqtt_report_interval_s', 'cfg_mqtt_retain'
     ];
     const cfgStat = () => document.getElementById('cfgStat');
 
@@ -2506,6 +2566,15 @@
         cfgEl.cfg_osd_show_ip.checked        = !!c.osd_show_ip;
         cfgEl.cfg_osd_show_time.checked      = !!c.osd_show_time;
         cfgEl.cfg_osd_show_ai_box.checked    = (c.osd_show_ai_box !== undefined) ? !!c.osd_show_ai_box : true;
+        cfgEl.cfg_mqtt_enabled.checked       = !!c.mqtt_enabled;
+        cfgEl.cfg_mqtt_broker_host.value     = (c.mqtt_broker_host !== undefined) ? c.mqtt_broker_host : 'broker.emqx.io';
+        cfgEl.cfg_mqtt_broker_port.value     = (c.mqtt_broker_port !== undefined) ? c.mqtt_broker_port : 1883;
+        cfgEl.cfg_mqtt_topic.value           = (c.mqtt_topic       !== undefined) ? c.mqtt_topic       : 'cam/ipv6';
+        cfgEl.cfg_mqtt_client_id.value       = (c.mqtt_client_id   !== undefined) ? c.mqtt_client_id   : 'v831cam';
+        cfgEl.cfg_mqtt_poll_sec.value        = (c.mqtt_poll_sec    !== undefined) ? c.mqtt_poll_sec    : 10;
+        cfgEl.cfg_mqtt_iface.value           = (c.mqtt_iface       !== undefined) ? c.mqtt_iface       : 'wlan0';
+        cfgEl.cfg_mqtt_report_interval_s.value = (c.mqtt_report_interval_s !== undefined) ? c.mqtt_report_interval_s : 3600;
+        cfgEl.cfg_mqtt_retain.checked        = (c.mqtt_retain !== undefined) ? !!c.mqtt_retain : true;
     }
 
     async function loadConfig() {
@@ -2541,6 +2610,15 @@
             osd_show_ip:        cfgEl.cfg_osd_show_ip.checked,
             osd_show_time:      cfgEl.cfg_osd_show_time.checked,
             osd_show_ai_box:    cfgEl.cfg_osd_show_ai_box.checked,
+            mqtt_enabled:       cfgEl.cfg_mqtt_enabled.checked,
+            mqtt_broker_host:   cfgEl.cfg_mqtt_broker_host.value.trim(),
+            mqtt_broker_port:   parseInt(cfgEl.cfg_mqtt_broker_port.value, 10),
+            mqtt_topic:         cfgEl.cfg_mqtt_topic.value.trim(),
+            mqtt_client_id:     cfgEl.cfg_mqtt_client_id.value.trim(),
+            mqtt_poll_sec:      parseInt(cfgEl.cfg_mqtt_poll_sec.value, 10),
+            mqtt_iface:         cfgEl.cfg_mqtt_iface.value.trim(),
+            mqtt_report_interval_s: parseInt(cfgEl.cfg_mqtt_report_interval_s.value, 10),
+            mqtt_retain:        cfgEl.cfg_mqtt_retain.checked,
         };
         cfgStat().textContent = '保存中…';
         const r = await api('POST', '/api/config', payload);

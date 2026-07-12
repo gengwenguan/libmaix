@@ -168,10 +168,17 @@ C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight, libmaix_cam_t* ai
     // 这里始终 Start，线程内会按 vmd_enabled 走极速 fast-path（一次 atomic load 即返回）。
     m_pVmd->SetSnapshot(m_pSnapshot.get());
     m_pVmd->Start();
+
+    // ---- IPv6 地址变化 MQTT 上报 ----
+    // 常驻后台线程，定时轮询 wlan0 全局 IPv6，变化时通过 MQTT 上报。
+    // 始终 Start；线程内按 AppConfig.mqtt_enabled 决定是否真正采集/连网（默认关，空转）。
+    m_pMqttReporter.reset(new C_MqttReporter());
+    m_pMqttReporter->Start();
 }
 
 
 C_Terminal::~C_Terminal(){
+    if (m_pMqttReporter) m_pMqttReporter->Stop();
     if (m_pVmd) m_pVmd->Stop();
     if (m_pPersonDetector) m_pPersonDetector->Stop();
 }

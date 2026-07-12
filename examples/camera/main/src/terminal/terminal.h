@@ -27,6 +27,7 @@
 #include "motionDetector.h"
 #include "tlsContext.h"
 #include "talkPlayer.h"
+#include "mqttReporter.h"
 
 class C_Terminal : public C_H264Enc::C_Listener,
                    public C_AacEnc::C_Listener,
@@ -125,6 +126,9 @@ private:
     // 握手时识别出来的 talk 客户端 fd 集合，仅这些 fd 的 binary 帧走 OPUS 播放
     std::mutex                         m_talkFdsMutex;
     std::set<int>                      m_talkFds;
+
+    // IPv6 地址变化 MQTT 上报（默认关闭，由 AppConfig.mqtt_* 控制）
+    std::unique_ptr<C_MqttReporter>    m_pMqttReporter;
 
     // 注册 HTTP API（录像目录浏览/下载等）
     void RegisterHttpApis();

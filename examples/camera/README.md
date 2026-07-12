@@ -50,6 +50,7 @@ camera/
 │       ├── websocketServer/       # WS/WSS 服务（直播 / 回放 / 对讲）
 │       ├── tlsContext/            # OpenSSL 上下文 + 自签名证书加载
 │       ├── talkPlayer/            # OPUS → ALSA 单向对讲播放器
+│       ├── mqttReporter/          # IPv6 地址变化 → MQTT 上报（手写 QoS0 客户端）
 │       ├── appConfig/             # 单例配置 + JSON 持久化（pull-on-demand 读取）
 │       └── utilTools/             # 日志、SPS 解析、shell 调试工具
 ├── person/                        # YOLOv2 person_int8 模型（推到 /root/models/）
@@ -299,6 +300,15 @@ ffmpeg -i in.wav -ar 48000 -ac 1 -sample_fmt s16 examples/camera/prompt/welcome.
 | `photo_jpeg_qual` | `88` | JPEG 编码质量（50 ~ 95） |
 | `mic_filter_mode` | `0` | 麦克风滤波：0=关闭 / 1=均衡 / 2=激进 / 3=精细 / 4=极激进 / 5=均衡+噪声门 |
 | `osd_show_ip` / `osd_show_time` / `osd_show_ai_box` | `true` | OSD 显示开关 |
+| `mqtt_enabled` | `false` | IPv6 地址 MQTT 上报总开关。**默认关闭**，关闭时后台线程空转、零网络开销 |
+| `mqtt_broker_host` | `broker.emqx.io` | MQTT broker 地址（域名 / IPv4 / IPv6 均可） |
+| `mqtt_broker_port` | `1883` | broker 端口（明文 MQTT，1 ~ 65535） |
+| `mqtt_topic` | `cam/ipv6` | 发布主题；payload 为纯 IPv6 字符串 |
+| `mqtt_client_id` | `v831cam` | MQTT client id（同 broker 下多设备需区分） |
+| `mqtt_poll_sec` | `10` | IPv6 轮询周期（秒，2 ~ 3600） |
+| `mqtt_iface` | `wlan0` | 监测的网卡名（取其全局 IPv6） |
+| `mqtt_report_interval_s` | `3600` | 保活重报周期（秒）：地址没变也每隔此间隔重报一次（心跳）；`0`=关闭仅变化时报；非 0 时下限 60、上限 86400 |
+| `mqtt_retain` | `true` | 是否让 broker 保留消息（retain）：新订阅者一连上即收到最后一次上报的地址 |
 
 仅以下环境变量保留为调试旁路：`AAC_DUMP_PATH`（导出原始 AAC 流到 `/tmp/test.aac`）。
 早期 `RECORD_SEGMENT_SEC` / `RECORD_RETAIN_DAYS` / `RECORD_MAX_BYTES` 已统一收敛到
@@ -485,6 +495,35 @@ sleep 30 秒再拉起看门狗）。脚本路径：`/root/maix_dist/mem_watchdog
 
 交叉工具链路径默认 `/opt/toolchain-sunxi-musl/`，
 不在该路径时脚本会提示修改 `GDB_TOOLCHAIN` 变量。
+
+### 12.3 IPv6 地址 MQTT 上报 (`mqttReporter/`)
+
+板子的公网 IPv6 由运营商动态下发、会不定期变化。外部要通过 IPv6 直连板子的
+web 服务（8080/8443）就得知道当前地址。为此
+[mqttReporter](file:///Users/bytedance/work/libmaix/examples/camera/main/src/mqttReporter)
+常驻一个后台线程，**定时轮询 wlan0 的全局 IPv6，变化时用 MQTT 把新地址发布出去**。
+
+**链路**：`getifaddrs` 取网卡全局 IPv6（排除 `fe80::` link-local 与 `::1`）→
+与上次缓存比较 → 变化则用手写 MQTT 客户端
+[mqttClient](file:///Users/bytedance/work/libmaix/examples/camera/main/src/mqttReporter/mqttClient.h)
+`connect → CONNECT → PUBLISH(QoS0) → DISCONNECT` 发布**纯 IPv6 字符串** payload。
+
+**设计要点**：
+- **手写 MQTT 客户端**：只实现 QoS0 发布，纯 libc socket（`getaddrinfo` 支持
+  v4/v6 broker），无第三方库、二进制零膨胀，契合 64MB 板。
+- **按需短连接**：检测到地址变化、或到达保活重报周期时才连 broker，publish 完立即断开，
+  不维持长连接。
+- **保活重报**：`mqtt_report_interval_s`（默认 1 小时）到点即使地址没变也重报一次，
+  作为心跳让订阅端感知设备存活、新订阅者能及时拿到当前地址；设 `0` 则仅变化时报。
+- **保留消息（retain）**：`mqtt_retain`（默认开）让 broker 存住最后一次地址，
+  新订阅者一连上立即收到当前 IPv6，无需等下次上报；与保活重报配合，值几乎不会过期。
+- **失败下轮重试**：publish 失败不更新缓存，下一轮轮询仍会重发。
+- **默认关闭**：`mqtt_enabled=false` 时线程只空转睡眠、不采集不连网。
+- **pull-on-demand**：broker / topic / 周期 / 网卡等每轮从 `AppConfig` 现取，
+  web 改完下一轮即生效（配置字段见 §6）。
+
+**验证**：订阅端 `mosquitto_sub -h broker.emqx.io -t cam/ipv6 -v`；
+在板子上 `mqtt_enabled=true` 后，冷启动会立刻收到当前 IPv6，之后地址变化或每到保活周期都会推送。
 
 ---
 

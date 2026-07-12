@@ -18,6 +18,7 @@ list(APPEND ADD_INCLUDE "dep/codec/inc"
                         "src/appConfig"
                         "src/tlsContext"
                         "src/talkPlayer"
+                        "src/mqttReporter"
     )
 list(APPEND ADD_PRIVATE_INCLUDE "")
 ###############################################
@@ -38,6 +39,7 @@ file(GLOB ADD_SRCS  "src/*.cpp"
                     "src/appConfig/*.cpp"
                     "src/tlsContext/*.cpp"
                     "src/talkPlayer/*.cpp"
+                    "src/mqttReporter/*.cpp"
     )
 ############ Add source files #################
 # list(APPEND ADD_SRCS    "src/main.c"
