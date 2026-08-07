@@ -6,7 +6,7 @@
   *Description:  IPv6 地址变化 MQTT 上报模块。
   *
   *  背景：M2dock（V831）wlan0 的公网 IPv6 由运营商动态下发、会不定期变化。
-  *        外部要通过 IPv6 直连板子 web 服务（8080/8443）就得知道当前地址。
+  *        外部要通过 IPv6 直连板子 web 服务（80/443）就得知道当前地址。
   *
   *  职责：常驻后台线程，定时轮询指定网卡（默认 wlan0）的"全局 IPv6 地址"，
   *        一旦相较上次发生变化，就用极简 MQTT 客户端（mqttClient）把新地址
@@ -41,12 +41,13 @@ public:
     // 停止线程并清理。可重入。
     void Stop();
 
-private:
-    void PollLoop();
-
     // 取指定网卡上第一个"全局单播 IPv6"地址（排除 fe80:: link-local、::1 回环）。
     // 取不到返回空串。返回值已去掉可能的 "%scope" 后缀。
+    // 这是无状态的网卡查询工具，同时供 MQTT 上报与 HTTP /api/netinfo 复用。
     static std::string GetGlobalIpv6(const std::string& iface);
+
+private:
+    void PollLoop();
 
     std::thread             m_thread;
     std::atomic<bool>       m_running{false};

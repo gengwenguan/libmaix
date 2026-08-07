@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include <atomic>
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -18,6 +19,24 @@
 
 /*没有继承C_LogAdapt类的或是C函数里进行打印使用该全局类接口*/
 C_LogAdapt  gs_objLogNormal;
+
+// 全局日志 sink：读多写极少（仅启动注册 / 退出注销），用原子指针发布即可，
+// 热路径读侧无锁。std::memory_order_acquire/release 保证 sink 对象对读线程可见。
+static std::atomic<ILogSink*> gs_pLogSink{nullptr};
+
+// 当前线程是否抑制向 sink 分叉（见 logAdapt.h 说明）。thread_local 保证推送线程
+// 与递归调用互不影响别的业务线程。
+static thread_local bool gs_bThreadLogSuppressed = false;
+
+void SetLogSink(ILogSink* sink)
+{
+    gs_pLogSink.store(sink, std::memory_order_release);
+}
+
+void SetThreadLogSuppressed(bool suppressed)
+{
+    gs_bThreadLogSuppressed = suppressed;
+}
 
 /*网络自适应模块不同级别日志输出接口*/
 void C_LogAdapt::LogInner(const char *pscLevel, const char *pscFile, const char *pscFunc, unsigned int uiLine, const char *pscFmt, ...)	
@@ -71,6 +90,17 @@ void C_LogAdapt::LogInner(const char *pscLevel, const char *pscFile, const char 
 				outputFile->open("run.log", std::ios::out | std::ios::binary);
 			}
 
+		}
+	}
+
+	// 分叉给 sink（如推送到 web）。无 sink 时仅一次原子 load，空载零开销。
+	// 抑制标志避免"sink 内部/推送线程打的日志"再次回灌，杜绝自激与死锁。
+	if (!gs_bThreadLogSuppressed) {
+		ILogSink* sink = gs_pLogSink.load(std::memory_order_acquire);
+		if (sink) {
+			gs_bThreadLogSuppressed = true;   // 本次分叉期间若递归打日志则跳过 sink
+			sink->OnLogLine(ascLogBuf, (unsigned int)strlen(ascLogBuf));
+			gs_bThreadLogSuppressed = false;
 		}
 	}
 }

@@ -14,7 +14,7 @@ set -e
 
 # ---------- 配置 ----------
 BUILD_USER="root"
-BUILD_HOST="2409:8a1e:7a56:b330:8647:9ff:fe45:35a0"
+BUILD_HOST="2409:8a1e:7a45:8ad0:8647:9ff:fe45:35a0"
 BUILD_DIR="/root/work/libmaix/examples/camera"
 
 DEVICE_USER="root"
@@ -132,6 +132,10 @@ do_push_device() {
 
         echo '[sync] 2.1) scp 推送 web 静态资源 (dist/web → ${DEVICE_DIR}/web)'
         if [ -d dist/web ]; then
+            # 先删板上旧 web/ 再整目录推：scp 只覆盖同名文件、不清理已删除项，
+            # 先 rm 可保证板上与本地完全一致（既补新增如 favicon.svg，又清残留）。
+            sshpass -p '${DEVICE_PASS}' ssh ${SSH_COMPAT_OPTS} \
+                ${DEVICE_USER}@${DEVICE_HOST} 'rm -rf ${DEVICE_DIR}/web'
             sshpass -p '${DEVICE_PASS}' scp -r -O \
                 ${SSH_COMPAT_OPTS} \
                 dist/web ${DEVICE_USER}@${DEVICE_HOST}:${DEVICE_DIR}/

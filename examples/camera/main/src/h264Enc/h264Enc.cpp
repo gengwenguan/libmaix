@@ -89,17 +89,16 @@ int C_H264Enc::InputData(unsigned char* inputData)
     // 周期性强制 IDR：硬编码器的 nMaxKeyInterval 在本平台不生效，只能由我们驱动
     // MSE/fMP4 必须每 1s 出一个 IDR，否则浏览器拿不到新 fragment 起播 / 续播
     if (m_inputCount > 0 && (m_inputCount % kIdrIntervalFrames) == 0) {
-        m_forceIframe = true;
+        m_forceIframe.store(true, std::memory_order_release);
     }
     m_inputCount++;
 
     //真正的强制I帧在送数据时进行控制
-    if(m_forceIframe){
+    if (m_forceIframe.exchange(false, std::memory_order_acq_rel)) {
         CLOG_INF("forceIframe\n");
         int value = 1;
         // 强制编码器编I帧
         VideoEncSetParameter(m_pVideoEnc, VENC_IndexParamForceKeyFrame, &value);
-        m_forceIframe = false;
         // 缓存 SPS/PPS（取一次缓存到成员变量，供 muxer 异步获取）
         CacheSpsPpsFromVenc();
     }

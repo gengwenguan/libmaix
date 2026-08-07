@@ -149,6 +149,10 @@ int main(int argc, char **argv)
     m_camera->start_capture(m_camera);
     libmaix_image_t *image = nullptr;
     C_Terminal* pterminal = new C_Terminal(kCamInW, kCamInH);
+    if (pterminal->Start() != 0) {
+        CLOG_ERR("Terminal start failed\n");
+        g_apprun = false;
+    }
     while(g_apprun)
     {
         CALC_FPS("g_apprun");
@@ -198,6 +202,10 @@ int main(int argc, char **argv)
 
     //创建终端用于视频编码以及网络传输给客户端；cam1 注入给内部的 PersonDetector
     C_Terminal* pterminal = new C_Terminal(kCamInW, kCamInH, m_camera1);
+    if (pterminal->Start() != 0) {
+        CLOG_ERR("Terminal start failed\n");
+        g_apprun = false;
+    }
     while(g_apprun)
     {
         CALC_FPS("g_apprun");
@@ -267,10 +275,10 @@ int main(int argc, char **argv)
         pterminal->InputNv21((unsigned char*)vir[0]);
     }
 
-    libmaix_vo_destroy(&m_vo);
     // 必须先 delete terminal —— 它的析构会 Stop PersonDetector 线程，确保后续
     // libmaix_cam_destroy(cam1) 时不再有线程在 capture_image。
     delete pterminal;
+    libmaix_vo_destroy(&m_vo);
     libmaix_cam_destroy(&m_camera);
     if (m_camera1) libmaix_cam_destroy(&m_camera1);
 

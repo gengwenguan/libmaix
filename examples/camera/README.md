@@ -13,7 +13,8 @@ Web 配置中心。
 ## 1. 功能特性
 
 - **双路摄像头**：cam0 (640×480 NV21，显示 + 编码)、cam1 (224×224 RGB888，AI 推理专用)
-- **直播**：fMP4 over WebSocket，原生 `MediaSource` 可播；HTTPS/WSS 自签名证书
+- **直播**：fMP4 over WebSocket，支持 `MediaSource` / iOS `ManagedMediaSource`；
+  HTTPS/WSS 自签名证书
 - **录像**：常驻按天分目录滚动落盘（单片时长可配置，默认 600s），双兜底清理（保留天数 + 总容量）
 - **回放**：HTTP `Range` / 206 流式分片下载 + **`.idx` sidecar 精准跳转**（小到几 KB 的伴生 JSON
   把每个 fMP4 fragment 的 byte offset / tfdt 时间戳列了出来，前端拖动进度条时只下载
@@ -51,12 +52,20 @@ camera/
 │       ├── tlsContext/            # OpenSSL 上下文 + 自签名证书加载
 │       ├── talkPlayer/            # OPUS → ALSA 单向对讲播放器
 │       ├── mqttReporter/          # IPv6 地址变化 → MQTT 上报（手写 QoS0 客户端）
+│       ├── httpClient/             # 出站 HTTP/1.0 客户端（设备动作代理 POST，仅 http://）
+│       ├── actionStore/            # 设备动作「按钮→URL」持久化（actions.json，可增删）
+│       ├── logBroadcaster/         # 日志广播：CLOG_* → /ws/log 订阅者（有订阅者才推）
+│       ├── sysInfoProvider/        # 系统资源采集（CPU/内存/VmData/磁盘/uptime，读 procfs）
+│       ├── lightController/        # 外接补光灯 GPIO 控制（PH13，时段/声控/持续时长）
 │       ├── appConfig/             # 单例配置 + JSON 持久化（pull-on-demand 读取）
 │       └── utilTools/             # 日志、SPS 解析、shell 调试工具
 ├── person/                        # YOLOv2 person_int8 模型（推到 /root/models/）
 ├── web/                           # 前端资源（index.html / favicon.ico / css/js）
-│   ├── index.html                 # 单页前端（直播 + 回放 + 对讲 + 配置）
-│   └── favicon.ico
+│   ├── index.html                 # 页面语义结构（直播 + 回放 + 相册 + 配置）
+│   ├── style.css                  # 响应式监控台视觉与移动端布局
+│   ├── app.js                     # MSE/WS 状态机、回放、相册与设置交互
+│   ├── favicon.svg                 # 摄像头光圈图标（矢量，浏览器标签页首选）
+│   └── favicon.ico                 # 同款图标位图兜底（16/32/48，老浏览器）
 ├── prompt/                        # 提示音资源（POST /api/prompt 播放）
 │   └── door.wav
 ├── cert/                          # TLS 自签名证书（server.crt / server.key）
@@ -74,13 +83,14 @@ camera/
 
 | 协议 | 端口 | 用途 |
 |---|---|---|
-| HTTP  | 8080 | 静态资源（`web/index.html`）+ REST API + 录像/相册下载 |
-| HTTPS | 8443 | 同上，TLS（自签名证书） |
+| HTTP  | 80 | 静态资源（`web/index.html`）+ REST API + 录像/相册下载 |
+| HTTPS | 443 | 同上，TLS（自签名证书） |
 | WS  (`/ws/live`) | 8081 | fMP4 直播推流（init segment + 持续 fragment） |
 | WS  (`/ws/audio`) | 8081 | **纯音频直播**（ADTS AAC 帧，省带宽） |
 | WS  (`/ws/talk`) | 8081 | 浏览器→板子 OPUS 二进制对讲帧 |
+| WS  (`/ws/log`) | 8081 | **设备运行日志实时推送**（CLOG_* 输出，UTF-8 文本；仅有订阅者时才推） |
 | WS  (`/ws/playback`) | 8082 | 旧版回放协议（保留兼容） |
-| WSS | 8444 / 8445 | live(含 `/ws/audio`) / playback 的 TLS 镜像 |
+| WSS | 8444 / 8445 | live(含 `/ws/audio`、`/ws/log`) / playback 的 TLS 镜像 |
 
 > HTTPS 仅在 `<exeDir>/cert/server.crt`、`server.key` 都存在时启用；
 > 不存在时自动降级为明文，但前端对讲按钮在 `http://` 下会因浏览器的麦克权限策略隐藏。
@@ -123,7 +133,7 @@ camera/
             │                                                                          │
    browser /ws/talk OPUS ──→ C_TalkPlayer ──→ ALSA speaker                            │
             │                                                                          │
-            │   HTTP/HTTPS ──→ httpServer (8080/8443) ──→ /api/* + Range 206         │
+            │   HTTP/HTTPS ──→ httpServer (80/443)    ──→ /api/* + Range 206         │
             └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -157,6 +167,13 @@ PersonDetector 只"使用"该 cam，不 own，main 负责 destroy。
 | POST| `/api/prompt`          | body `{name:"door"}`：同步播放 `<exeDir>/prompt/<name>.wav`（详见 §5.3） |
 | GET | `/api/config`          | 当前 AppConfig snapshot（JSON） |
 | POST| `/api/config` (form/json) | 局部更新 + 落盘；下个决策点（每帧 / 每片 / 每次扫描）即时生效 |
+| GET | `/api/netinfo`         | 设备真实网卡地址 `{ipv4, ipv6}`：IPv4 枚举网卡取首个非回环地址；IPv6 取监测网卡（`mqtt_iface`，默认 wlan0）全局单播地址（排除 `fe80::`/`::1`，取不到为空串）。实况页「设备状态」卡片展示 |
+| GET | `/api/sysinfo`         | 设备系统资源快照 `{cpu, load, mem, proc, disk, uptime, proc_uptime}`：读 procfs/statvfs。CPU% 为两次请求间 `/proc/stat` 差值（首次 `cpu.valid=false`）；`proc` 含本进程 VmData 与 mem_watchdog 阈值；`uptime` 为整机开机时长、`proc_uptime` 为 camera 进程运行时长（详见 §5.6）。实况页「设备状态」5s 轮询 |
+| GET | `/api/actions`         | 设备动作代理列表 `{ok, actions:[{id,name,url}]}`：web 上可增删的「按钮→URL」映射（详见 §5.4） |
+| POST| `/api/actions`         | body `{name, url}`：新增一个动作。`url` 仅接受 `http://`；成功 201 返回 `{ok,action}`，数量超上限（32）返回 409，其它校验失败 400 |
+| POST| `/api/actions/update`  | body `{id, name, url}`：按 id 就地修改按钮名/URL，校验规则同新增；成功 `{ok,action}`，id 不存在 404，校验失败 400 |
+| POST| `/api/actions/delete`  | body `{id}`：删除指定动作，不存在返回 404 |
+| POST| `/api/actions/invoke`  | body `{id}`：由**后端出站** POST 到该动作的 `url`（避免浏览器跨域/混合内容限制）。成功返回 `{ok,status,name}`；出站链路失败返回 502 带 `err` |
 
 录像/相册下载走 `httpServer` 的 `ApiResponse::filePath` 流式分支，**不会**把整个文件读到
 内存里——这是在 64MB 板子上的硬性约束。
@@ -181,7 +198,7 @@ PersonDetector 只"使用"该 cam，不 own，main 负责 destroy。
 前端做时间→fragment 映射只需一次 lower_bound。`RecordCleaner` 删 mp4 时同步
 `unlink` 同名 `.idx`。
 
-**回放端**（[web/index.html](file:///Users/bytedance/work/libmaix/examples/camera/web/index.html)）：首次 GET `.idx`（几 KB），之后每次 seek：
+**回放端**（[web/app.js](file:///Users/bytedance/work/libmaix/examples/camera/web/app.js)）：首次 GET `.idx`（几 KB），之后每次 seek：
 
 1. 目标仍在 `SourceBuffer.buffered` 内 → 直接 `currentTime = t`，不发请求
 2. 否则按 `.idx` 定位目标 fragment 的 `[off, off+size)`，单次 `Range` 拉回 append
@@ -209,10 +226,9 @@ PersonDetector 只"使用"该 cam，不 own，main 负责 destroy。
 ——每帧 raw AAC 加 7 字节 ADTS 头后广播，**不依赖 muxer / 首个 IDR**，
 视频通路尚未就绪时也能听到声音。
 
-**浏览器端**（[web/index.html](file:///Users/bytedance/work/libmaix/examples/camera/web/index.html) 顶栏 `🎧 仅音频` 按钮）：
-`stopLive()` 释放 MSE 后连 `/ws/audio`，用 `AudioContext.decodeAudioData` 解 ADTS，
-单调递增的 `audioPlayHead` 调度播放，落后超 1.2s 自动追帧，排队 >12 帧丢一帧防抖动。
-Safari/iOS 需用户手势触发 `audioCtx.resume()`。
+当前监控台未暴露独立的“仅音频”入口；定制客户端可直接连接 `/ws/audio`，
+用 Web Audio 或原生 AAC 解码器消费 ADTS 帧。Safari/iOS 仍需用户手势触发
+`AudioContext.resume()`。
 
 | 维度 | `/ws/live` (fmp4) | `/ws/audio` (ADTS AAC) |
 |---|---|---|
@@ -253,6 +269,117 @@ ffmpeg -i in.wav -ar 48000 -ac 1 -sample_fmt s16 examples/camera/prompt/welcome.
 
 **HTTP 响应码**：`200`（含 `duration_ms`）/ `400`（缺字段或非法 name）/
 `404`（文件不存在）/ `409`（busy）/ `500`（格式不符或 ALSA 错误）。
+
+### 5.4 设备动作代理：web 可增删的「按钮→URL」出站 POST
+
+需要点一下 web 按钮就让摄像头去局域网里的某个设备（门锁 / 灯控 / 面板等）发一条
+指令时，直接用浏览器 `fetch` 往目标设备发会撞上两堵墙：**跨域（CORS）** 和
+**混合内容**（HTTPS 页面禁止请求 `http://` 目标）。本项目改由**后端代理出站**：
+浏览器只调本机同源的 `/api/actions/invoke`，真正的 POST 由开发板发出。
+
+- **配置持久化**：动作列表存 `<exeDir>/actions.json`（数组 `[{id,name,url}]`），
+  由 [actionStore.cpp](file:///Users/bytedance/work/libmaix/examples/camera/main/src/actionStore/actionStore.cpp)
+  加锁读写。单独一份文件而不塞进 `config.json`，是因为 `appConfig` 的解析器只支持
+  扁平标量，撑不了数组/对象。上限 32 条，`name`≤32 字节、`url`≤512 字节，均过滤控制字符。
+- **出站客户端**：[httpClient.cpp](file:///Users/bytedance/work/libmaix/examples/camera/main/src/httpClient/httpClient.cpp)
+  是纯 libc socket 实现的极简 HTTP/1.0 客户端：`getaddrinfo` 解析（支持
+  `http://host[:port][/path]` 与 `[IPv6]:port` 字面量）→ 非阻塞 connect + `select`
+  超时（默认 5s）→ 发 `POST` + `Connection: close` → 只读状态行取状态码。**仅支持
+  `http://`**（板上不做 HTTPS 客户端）；出站 POST 阻塞跑在 HTTP 客户端线程，不影响
+  采集/编码/直播线程。
+- **前端**：实况页「设备动作」卡片列出按钮，点击即 `invoke`；卡片内 `<details>`
+  折叠出「名称 + URL」表单，支持新增、**编辑**（点列表行「编辑」把该项填回表单、
+  按钮切「保存」并高亮当前行，可「取消」）与删除。列表为空时整卡隐藏。初始
+  `actions.json` 为空，开门/开灯/关灯等按钮由使用者自行在 web 上添加。
+
+**HTTP 响应码**：`GET /api/actions` → `200`；`POST /api/actions` → `201` / `400`
+（校验失败）/ `409`（超上限）；`POST /api/actions/update` → `200` / `400`（校验失败）
+/ `404`（id 不存在）；`POST /api/actions/delete` → `200` / `404`；
+`POST /api/actions/invoke` → `200`（含目标 `status`）/ `404`（id 不存在）/
+`502`（出站链路失败，带 `err`）。
+
+### 5.5 设备运行日志实时查看：`/ws/log`
+
+实况页「设备运行日志」折叠框展开后，浏览器会订阅 `/ws/log`，把开发板上
+`CLOG_*` / `NLOG_*` 的输出实时推到网页（免 ssh 上板 `tail -f run.log`）。设计要点：
+
+- **解耦的日志出口**：所有日志最终汇入
+  [C_LogAdapt::LogInner](file:///Users/bytedance/work/libmaix/examples/camera/main/src/utilTools/logAdapt.cpp)，
+  它照常写 `stdout` + `run.log`，末尾多一步"分叉给 sink"。logAdapt 只认识抽象接口
+  `ILogSink`，不依赖 WebSocket，避免底层日志模块反向依赖上层网络模块。
+- **有界缓冲 + 独立推送线程**：
+  [logBroadcaster.cpp](file:///Users/bytedance/work/libmaix/examples/camera/main/src/logBroadcaster/logBroadcaster.cpp)
+  实现 `ILogSink`。业务线程（相机 / 编码 / 网络）只把日志行**入有界队列**（上限 200 行，
+  超限丢最早）；真正的广播由一条独立线程在锁外完成——弱网网页**绝不反压**采集/编码。
+- **零空载开销**：无 `/ws/log` 订阅者时（原子计数为 0），`OnLogLine` 第一行即 return，
+  不构造字符串、不入队。订阅者数由 terminal 在 `/ws/log` 握手/断开时维护。
+- **自激防护**：推送线程整个生命周期 `SetThreadLogSuppressed(true)`，因此广播路径
+  （含 WS 出错打的日志）产生的日志不会再回灌队列，杜绝无限自激与死锁。
+- **传输与呈现**：后端用 WS **binary 帧承载 UTF-8** 文本（复用直播已有的有界发送队列，
+  不改热路径）；前端 `TextDecoder` 解码后按行渲染，**最多 100 行**、超限删最早，并按
+  级别染色（ERR/FLT 红、WRN 黄、INF 灰）。折叠框收起或切走实况页即断开连接。
+
+---
+
+### 5.6 设备系统资源监控：`GET /api/sysinfo`
+
+实况页「设备状态」卡片除网卡/录像外，还每 5 秒轮询 `/api/sysinfo` 展示 CPU、
+内存、进程内存、存储、运行时长，每项带一条按水位染色的进度条
+（<70% 青、70~90% 黄、>90% 红）。采集实现在
+[sysInfoProvider.cpp](file:///Users/bytedance/work/libmaix/examples/camera/main/src/sysInfoProvider/sysInfoProvider.cpp)，
+全部只读、无副作用：
+
+- **CPU 使用率**：读两次 `/proc/stat` 的 cpu 汇总行求 busy/total 差值。因此需要跨请求
+  保留上次采样（`C_SysInfoProvider` 持有 `m_lastCpu`，加锁保护），**首次请求
+  `cpu.valid=false`**（无历史样本），第二次起才有值。另附 `/proc/loadavg` 负载。
+- **系统内存**：`/proc/meminfo` 的 `MemTotal` 与 `MemAvailable`（老内核回退 `MemFree`）。
+- **进程内存**：`/proc/self/status` 的 `VmRSS` / `VmData`。**`VmData` 正是
+  [mem_watchdog.sh](file:///Users/bytedance/work/libmaix/examples/camera/mem_watchdog.sh)
+  监控的指标**（闭源库慢泄漏体现在此，到 80MB=81920KB 阈值就重启）；响应里回显该阈值，
+  web 上以「进程内存 / 重启阈值」进度条直观显示"离看门狗重启还有多远"。
+- **存储**：对录像目录做 `statvfs`（eMMC 用户分区，关心"还能录多久"）。
+- **运行时长**：分两项——
+  - **系统运行**（`uptime`）：`/proc/uptime`，整机自开机起的秒数。
+  - **进程运行**（`proc_uptime`）：`系统 uptime − /proc/self/stat` 第 22 字段 `starttime`/`sysconf(_SC_CLK_TCK)`。
+    这是 camera 进程本身已运行多久，**因 mem_watchdog 到阈值会重启进程，该值能直观反映
+    "距上次（看门狗/手动）重启多久"**，比系统 uptime 更贴合运维观察。解析时注意 `/proc/self/stat`
+    第 2 字段 comm 可能含空格/括号，须从最后一个 `)` 之后再按空格切字段。
+
+每一项都带 `valid` 标志：某来源在当前平台不可读时（如非 Linux 环境无 procfs）
+返回 `valid=false`，前端显示「不可用」而非崩溃或误显 0。
+
+### 5.7 外接补光灯：`lightController/`（GPIO PH13）
+
+监控摄像头本身无补光，外接一路 LED 灯板（`VCC/GND/DO` 三针），由
+[lightController.cpp](file:///Users/bytedance/work/libmaix/examples/camera/main/src/lightController/lightController.cpp)
+的常驻线程按配置每 ~500ms 评估"此刻是否该亮"，通过 sysfs 写 GPIO 电平。
+
+**接线（GPIO 只做控制信号，灯单独供电）**：
+
+```
+M2Dock                         LED 灯板
+────────                       ────────
+独立 5V+           ──────────> VCC       （大功率灯不要直接吃开发板 5V）
+GND（开发板+电源共地）──────────> GND
+PH13 / GPIO237 ──470Ω~1kΩ────> DO        （3.3V 控制信号；勿把 5V 接回 PH13）
+```
+
+- **控制脚**：默认 `PH13 = 237`（`7×32+13`）。板上主 PIO 控制器 `gpiochip0` base=0/ngpio=288，
+  已实测 `echo 237 > /sys/class/gpio/export` 可用。不用 `PH14=238`，因其与板载 State LED 复用。
+- **GPIO 访问**：sysfs（`export` → `direction=out`（初始 low，避免上电误亮）→ 持久打开 `value`
+  fd，切换只写一字节）。Stop 时先灭灯、关 fd、`unexport`。编号由 `light_gpio` 配置，越界回退 237。
+- **触发逻辑**（现拉 AppConfig，改完即时生效）：不在时段或未启用→灭；时段内 `light_mode=0` 常亮；
+  `light_mode=1` 声控——麦克风响度 ≥ `light_sound_thresh` 时把点亮截止时刻推到 `now+light_hold_s`，
+  期间再有声音会续期。时段 `[light_start_hour, light_end_hour)` 按北京时间（UTC+8）解释，支持跨零点（如 18→6）。
+- **响度来源**：复用 AAC 采集线程——每 20ms 的原始 S16 PCM 顺带算一次 RMS（低响度放大后封顶 0~100），
+  通过一个全局原子量发布，声控读它，无额外线程/设备占用（V831 ALSA `default` 独占）。
+- **配置项**：`light_enabled`（默认关）、`light_mode`、`light_start_hour`/`light_end_hour`、
+  `light_sound_thresh`（0~100）、`light_hold_s`、`light_gpio`、`light_active_low`（低电平点亮灯板勾选）。
+  v3 在 v2 响度上再放大 5 倍并封顶 100；旧配置会一次性迁移（v2 的 7→v3 的 35）
+  并写入版本标记，避免重复放大。
+
+> ⚠️ 时段明确按北京时间（UTC+8）判定；仍依赖板端 epoch 正确，若无 NTP/RTC 校准，"晚上"的判定会不准。
+> 大功率灯务必独立供电 + 与开发板共地，灯板附近并联 100nF + 100~470µF 电容抑制开灯瞬间对摄像头电源的干扰。
 
 ---
 
@@ -366,7 +493,7 @@ Mac (本地)              ──rsync──>  编译机                      ─
 - 抓拍目录：`<exeDir>/snapshot/`
 - 模型目录：`/root/models/person_int8.{bin,param}`（缺失时 AI 模块不致命）
 - 证书目录：`<exeDir>/cert/server.{crt,key}`（缺失时降级 HTTP/WS 明文）
-- 前端文件：`<exeDir>/web/index.html`（CMake 把 `web/` 整目录复制过去）
+- 前端文件：`<exeDir>/web/{index.html,style.css,app.js}`（CMake 整目录复制）
 
 ---
 
@@ -397,9 +524,13 @@ Mac (本地)              ──rsync──>  编译机                      ─
 
 ## 10. 信号 / 优雅退出
 
-捕获 `SIGINT / SIGTERM / SIGTSTP / SIGQUIT / SIGPIPE / SIGKILL` →
-置 `g_apprun=false` → 主循环退出 → `delete pterminal`（先停 PersonDetector 线程，
-再依次释放 vo / cam0 / cam1）→ `libmaix_module_deinit`。
+捕获 `SIGINT / SIGTERM`（`SIGPIPE` 全局忽略）→ 置 `g_apprun=false` → 主循环退出 →
+`delete pterminal`。`Terminal::Stop()` 先停止并 join HTTP/两个 WebSocket 的
+accept/client 线程，再停止 AAC 生产线程，随后释放 muxer、录像、检测与音频资源；
+最后 main 依次释放 vo / cam0 / cam1 并执行 `libmaix_module_deinit`。
+
+AAC 与 WebSocket 都采用显式 `Start/Stop`：构造阶段只准备资源，等 `Terminal`
+完整构造后才启动可能回调宿主的线程，避免构造期发布未完成的 `this`。
 
 > 由于 V831 cedar / VI / disp / snd 都是独占设备，
 > 旧进程被杀后内核异步释放 fd 仍需 1~2 秒；`sync.sh push` 会主动 `pidof` 轮询 +
@@ -410,17 +541,18 @@ Mac (本地)              ──rsync──>  编译机                      ─
 ## 11. 直播稳定性优化
 
 fMP4 over WebSocket 直播在长时间运行和弱网环境下面临几类典型问题，
-本项目做了三层针对性优化。
+本项目从时间轴、缓冲水位、发送背压和浏览器能力探测四个层面处理。
 
 ### 11.1 预缓冲起播（解决首帧卡顿）
 
 **问题**：新客户端刚连上时，只收到 1 个 fragment 就调用 `video.play()`，
 `readyState` 不足，画面卡在首帧不动或频繁缓冲。
 
-**方案**：前端设置 `LIVE_START_BUFFER = 1.6s` 起播水位，
-收满约 1.6 秒的 fragment 后再调用 `play()`，保证有足够的解码缓冲打底。
+**方案**：前端设置 `LIVE_START_BUFFER = 1.8s` 起播水位，起播点保持在
+`buffered.end - 1s` 左右。fMP4 约每秒抵达一片，若只落后末端 0.1~0.4 秒，
+播放头会在下一片到达前耗尽缓冲，反而形成周期性 `waiting`。
 
-相关代码见 [web/index.html](file:///Users/bytedance/work/libmaix/examples/camera/web/index.html)
+相关代码见 [web/app.js](file:///Users/bytedance/work/libmaix/examples/camera/web/app.js)
 的 `liveStarted` 标志和 `pump()` 中的起播判定。
 
 ### 11.2 分级倍速追尾（解决延迟累积）
@@ -432,13 +564,14 @@ fMP4 over WebSocket 直播在长时间运行和弱网环境下面临几类典型
 
 | 延迟区间 | 策略 | 说明 |
 |---|---|---|
-| < 1s | 正常 1.0x | 不追，保持观感流畅 |
-| 1s ~ 2s | 1.1x 慢追 | 轻微加速，观众几乎无感 |
-| 2s ~ 8s | 1.3x 中速追 | 明显加速但可接受 |
-| > 8s | 硬 seek 到 live 边缘 | 直接跳转到最新关键帧（极端情况兜底） |
+| ≤ 0.8s | 正常 1.0x | 停止追尾，避免耗尽前向缓冲 |
+| 1.5s ~ 2.5s | 1.08x 慢追 | 平滑回到目标水位 |
+| 2.5s ~ 8s | 1.2x 中速追 | 加快消化网络积压 |
+| > 8s | seek 到 `end-1s` | 保留一片抗抖动水位 |
 
 同时把 MSE 缓冲窗口放宽到 6s，给追尾留出操作空间。
-页面可见时追尾更积极（阈值 1s），后台/不可见时放宽到 3s 避免频繁调整。
+页面隐藏或锁屏时主动断开直播，恢复可见后重建 MSE 并重新追到实时位置，
+避免移动浏览器后台限速造成延迟和内存持续累积。
 
 ### 11.3 大 PTS 累积修复（方案 C：timestampOffset 归零）
 
@@ -457,13 +590,65 @@ MSE 的解码基准时间轴错位（`currentTime` 从十几万秒开始），
 - `parseFirstTfdt(arrayBuf)`：递归扫描 MP4 box，定位 `moof → traf → tfdt`，
   返回 64 位 baseMediaDecodeTime（90kHz 时基）
 - 在 `pump()` 首次 append 前设置 `sb.timestampOffset`
+- `tfdt=0` 同样必须把 `tsOffsetSet` 置为真；否则第二片才设置负偏移，
+  会被映射回 0 秒并与首片重叠，直接导致首帧后定格
 - `VIDEO_TIMESCALE = 90000` 与服务端 fmp4Muxer 的时基一致
-- 每次重连（`reconnectLive`）时复位 `tsOffsetSet` 标志，重新计算
+- 每次重连时复位 `tsOffsetSet` 标志，重新计算
 
 > 为什么不在服务端重写 tfdt？服务端是单生产者多消费者架构，
 > 重写 tfdt 需要为每个客户端单独维护一份 fragment 拷贝，内存和 CPU 开销
 > 在 64MB 板子上不可接受。方案 C 把计算量全部转移到前端，
-> 服务端零改动，是最经济的解法。
+> 无需在服务端做逐客户端 tfdt 改写，是更经济的时间轴处理方式。
+
+### 11.4 单连接发送隔离（解决弱网拖死采集）
+
+握手线程先同步发完 init segment，再把连接置为 `WS_OPEN`，从协议顺序上保证
+fragment 不会抢在 init 前面。后续直播数据只写入每客户端的有界队列
+（最多 8 片 / 1 MiB），由该客户端线程串行执行 socket/SSL 写操作。
+队列满时丢最老片段；muxer 只在 IDR 边界切片，所以新片可独立恢复。
+慢客户端不再阻塞 H264 回调和相机帧释放。
+
+所有客户端线程均由服务器持有并在 `Stop()` 时 join，不使用 detached thread。
+HTTP 限制请求头 16 KiB、body 1 MiB、完整请求读取 10 秒，并最多同时处理 6 个客户端；
+WebSocket 限制握手 16 KiB、客户端入站帧 64 KiB，直播/旧回放分别最多 6/2 个客户端。
+长度检查使用减法形式避免 64 位 payload 长度回绕，超限或协议错误直接断开连接。
+
+### 11.5 移动浏览器兼容与自恢复
+
+- 从 init segment 的 `avcC` 动态生成实际 AVC codec 字符串，不再只信硬编码 profile
+- 同时探测 `MediaSource`、iPhone Safari 的 `ManagedMediaSource` 和旧 WebKit 前缀
+- iPhone 的 MMS 使用 `<source src="blob:...">` 绑定并禁用远程播放，普通 MSE 仍使用
+  `video.src`
+- 兼容 WebSocket 返回 `ArrayBuffer` 或 `Blob`
+- 校验首包必须包含 `ftyp+moov`，异常片段丢弃并重新请求 IDR
+- 连接关闭、8 秒无媒体片段或播放时间轴停滞 6 秒时指数退避重连
+- 浏览器没有 MediaSource 时只禁用直播，相册、设置和原生录像回放仍可使用，
+  不再因自动起播抛异常而中断整页脚本
+- 旧录像若曾在 P 帧处切 fragment，WebKit 的首个 `buffered` 区间可能晚于 0 秒；
+  回放会自动把播放头钳制到首个可解码时间，避免停在 `HAVE_METADATA`
+
+#### iPhone / iPad 兼容范围
+
+| 环境 | 直播 | `.idx + Range` 回放 | 说明 |
+|---|---|---|---|
+| iOS / iPadOS 17.1+ Safari | 支持 | 支持 | 使用 `ManagedMediaSource`，建议升级到当前系统版本 |
+| iOS / iPadOS 17.0 及更早 | 不支持 | 有限回退 | 系统没有 MSE/MMS；直播会明确提示升级，回放仅尝试原生 MP4 |
+| macOS Safari、Chrome、Edge | 支持 | 支持 | 使用标准 `MediaSource` |
+
+iOS 上的 Chrome、Edge 等浏览器若使用系统 WebKit，能力边界与 Safari 相同。直播默认
+静音以满足自动播放策略，开启声音或回放被系统拦截时需要用户点击播放器。通过 HTTPS/WSS
+访问自签名证书服务时，必须先在设备上信任证书，否则 Safari 会阻止 WebSocket 连接。
+旧 iOS 的原生 MP4 回退无法保证播放 `empty_moov` 录像，完整直播和精准回放以
+iOS / iPadOS 17.1+ 为最低支持版本。
+
+### 11.6 监控台 UI 与资源管理
+
+- `index.html`、`style.css`、`app.js` 按结构、视觉和逻辑拆分，仍保持零框架依赖
+- 桌面端左列为画面 + 直播控制/设备动作、右侧栏为紧凑「设备状态」列表，双列设置卡片；手机端改为底部导航和单列布局
+- 切离实况或页面进入后台时释放 MSE/WebSocket，返回后自动恢复
+- API 统一增加超时和错误返回；设置页提示未保存状态并校验数值
+- 大录像下载走浏览器原生流，回放预拉只缓存一份不超过 8 MiB 的小文件，
+  避免手机内存被完整 MP4 或多份预拉缓存占满
 
 ---
 
@@ -499,7 +684,7 @@ sleep 30 秒再拉起看门狗）。脚本路径：`/root/maix_dist/mem_watchdog
 ### 12.3 IPv6 地址 MQTT 上报 (`mqttReporter/`)
 
 板子的公网 IPv6 由运营商动态下发、会不定期变化。外部要通过 IPv6 直连板子的
-web 服务（8080/8443）就得知道当前地址。为此
+web 服务（80/443）就得知道当前地址。为此
 [mqttReporter](file:///Users/bytedance/work/libmaix/examples/camera/main/src/mqttReporter)
 常驻一个后台线程，**定时轮询 wlan0 的全局 IPv6，变化时用 MQTT 把新地址发布出去**。
 

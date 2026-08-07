@@ -19,6 +19,11 @@ list(APPEND ADD_INCLUDE "dep/codec/inc"
                         "src/tlsContext"
                         "src/talkPlayer"
                         "src/mqttReporter"
+                        "src/httpClient"
+                        "src/actionStore"
+                        "src/logBroadcaster"
+                        "src/sysInfoProvider"
+                        "src/lightController"
     )
 list(APPEND ADD_PRIVATE_INCLUDE "")
 ###############################################
@@ -40,6 +45,11 @@ file(GLOB ADD_SRCS  "src/*.cpp"
                     "src/tlsContext/*.cpp"
                     "src/talkPlayer/*.cpp"
                     "src/mqttReporter/*.cpp"
+                    "src/httpClient/*.cpp"
+                    "src/actionStore/*.cpp"
+                    "src/logBroadcaster/*.cpp"
+                    "src/sysInfoProvider/*.cpp"
+                    "src/lightController/*.cpp"
     )
 ############ Add source files #################
 # list(APPEND ADD_SRCS    "src/main.c"

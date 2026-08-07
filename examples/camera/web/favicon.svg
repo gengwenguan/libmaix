@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100" role="img" aria-label="摄像头光圈">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0e1d29"/>
+      <stop offset="1" stop-color="#081420"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6fe8d6"/>
+      <stop offset="1" stop-color="#25998b"/>
+    </linearGradient>
+    <linearGradient id="bladeA" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#54d7c6"/>
+      <stop offset="1" stop-color="#3fc3b2"/>
+    </linearGradient>
+    <linearGradient id="bladeB" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#34b7a7"/>
+      <stop offset="1" stop-color="#2a9c8e"/>
+    </linearGradient>
+    <radialGradient id="lens" cx="0.42" cy="0.4" r="0.75">
+      <stop offset="0" stop-color="#12586a"/>
+      <stop offset="0.45" stop-color="#0a3442"/>
+      <stop offset="1" stop-color="#031319"/>
+    </radialGradient>
+    <linearGradient id="crescent" x1="0" y1="0" x2="0.7" y2="1">
+      <stop offset="0" stop-color="#eafffb" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#bff3ec" stop-opacity="0"/>
+    </linearGradient>
+    <clipPath id="disc"><circle cx="50" cy="50" r="37"/></clipPath>
+  </defs>
+
+  <!-- 深色圆角底：与监控台暗色主题一致 -->
+  <rect x="2" y="2" width="96" height="96" rx="22" fill="url(#bg)"/>
+
+  <!-- 6 叶光圈：严格 6 次旋转对称的四边形叶片，无重叠平铺整个环带，
+       交替明暗 + 旋涡偏移，读作光圈 -->
+  <g clip-path="url(#disc)" stroke="#0a2b33" stroke-width="1.15" stroke-linejoin="round">
+    <path d="M87.0,50.0 L68.5,17.96 L51.83,32.6 L65.99,42.88 Z" fill="url(#bladeA)"/>
+    <path d="M68.5,17.96 L31.5,17.96 L35.84,39.71 L51.83,32.6 Z" fill="url(#bladeB)"/>
+    <path d="M31.5,17.96 L13.0,50.0 L34.01,57.12 L35.84,39.71 Z" fill="url(#bladeA)"/>
+    <path d="M13.0,50.0 L31.5,82.04 L48.17,67.4 L34.01,57.12 Z" fill="url(#bladeB)"/>
+    <path d="M31.5,82.04 L68.5,82.04 L64.16,60.29 L48.17,67.4 Z" fill="url(#bladeA)"/>
+    <path d="M68.5,82.04 L87.0,50.0 L65.99,42.88 L64.16,60.29 Z" fill="url(#bladeB)"/>
+  </g>
+
+  <!-- 中心镜头：圆形深腔玻璃 + 青绿内沿 + 眉月反光，明确读作镜头 -->
+  <circle cx="50" cy="50" r="14.5" fill="url(#lens)" stroke="#0a2b33" stroke-width="1.1"/>
+  <circle cx="50" cy="50" r="14.5" fill="none" stroke="#5de0cd" stroke-width="1" opacity="0.4"/>
+  <path d="M50,38.4 A11.6,11.6 0 0 0 39.2,45.6 A8.6,8.6 0 0 1 50,40.9 Z" fill="url(#crescent)"/>
+  <circle cx="45.4" cy="45.4" r="1.5" fill="#eafffb" opacity="0.6"/>
+
+  <!-- 镜筒外环 -->
+  <circle cx="50" cy="50" r="39.5" fill="none" stroke="url(#ring)" stroke-width="5"/>
+  <circle cx="50" cy="50" r="36.2" fill="none" stroke="#0a2b33" stroke-width="1.3" opacity="0.6"/>
+</svg>

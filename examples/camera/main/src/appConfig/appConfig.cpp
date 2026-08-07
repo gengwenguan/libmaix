@@ -80,6 +80,11 @@ void C_AppConfig::Init(const std::string& path)
         SaveToFile_locked();
     }
     ClampSnapshot(m_snap);
+    // 旧配置迁移完成后立刻回写版本标记，保证只放大一次；写失败不影响本次运行。
+    if (m_needsSave) {
+        SaveToFile_locked();
+        m_needsSave = false;
+    }
 }
 
 C_AppConfig::Snapshot C_AppConfig::GetSnapshot() const
@@ -132,6 +137,15 @@ std::string C_AppConfig::ToJson(const Snapshot& s)
        << ",\"osd_show_ip\":"      << (s.osd_show_ip   ? "true" : "false")
        << ",\"osd_show_time\":"    << (s.osd_show_time ? "true" : "false")
        << ",\"osd_show_ai_box\":"  << (s.osd_show_ai_box ? "true" : "false")
+       << ",\"light_enabled\":"     << (s.light_enabled ? "true" : "false")
+       << ",\"light_mode\":"        << s.light_mode
+       << ",\"light_start_hour\":"  << s.light_start_hour
+       << ",\"light_end_hour\":"    << s.light_end_hour
+       << ",\"light_sound_thresh\":"<< s.light_sound_thresh
+       << ",\"light_sound_scale_version\":" << s.light_sound_scale_version
+       << ",\"light_hold_s\":"      << s.light_hold_s
+       << ",\"light_gpio\":"        << s.light_gpio
+       << ",\"light_active_low\":"  << (s.light_active_low ? "true" : "false")
        << ",\"mqtt_enabled\":"     << (s.mqtt_enabled ? "true" : "false")
        << ",\"mqtt_broker_host\":\"" << s.mqtt_broker_host << "\""
        << ",\"mqtt_broker_port\":" << s.mqtt_broker_port
@@ -165,6 +179,15 @@ bool C_AppConfig::AssignKv(Snapshot& s, const std::string& k, const std::string&
     else if (k == "osd_show_ip")        s.osd_show_ip       = StrToBool(v, s.osd_show_ip);
     else if (k == "osd_show_time")      s.osd_show_time     = StrToBool(v, s.osd_show_time);
     else if (k == "osd_show_ai_box")    s.osd_show_ai_box   = StrToBool(v, s.osd_show_ai_box);
+    else if (k == "light_enabled")      s.light_enabled     = StrToBool(v, s.light_enabled);
+    else if (k == "light_mode")         s.light_mode        = StrToInt(v,  s.light_mode);
+    else if (k == "light_start_hour")   s.light_start_hour  = StrToInt(v,  s.light_start_hour);
+    else if (k == "light_end_hour")     s.light_end_hour    = StrToInt(v,  s.light_end_hour);
+    else if (k == "light_sound_thresh") s.light_sound_thresh= StrToInt(v,  s.light_sound_thresh);
+    else if (k == "light_sound_scale_version") s.light_sound_scale_version = StrToInt(v, s.light_sound_scale_version);
+    else if (k == "light_hold_s")       s.light_hold_s      = StrToInt(v,  s.light_hold_s);
+    else if (k == "light_gpio")         s.light_gpio        = StrToInt(v,  s.light_gpio);
+    else if (k == "light_active_low")   s.light_active_low  = StrToBool(v, s.light_active_low);
     else if (k == "mqtt_enabled")       s.mqtt_enabled      = StrToBool(v, s.mqtt_enabled);
     else if (k == "mqtt_broker_host")   s.mqtt_broker_host  = Trim(v);
     else if (k == "mqtt_broker_port")   s.mqtt_broker_port  = StrToInt(v,  s.mqtt_broker_port);
@@ -195,6 +218,14 @@ void C_AppConfig::ClampSnapshot(Snapshot& s)
     s.vmd_area_ratio     = Clamp(s.vmd_area_ratio,    0.001f, 0.5f);
     s.vmd_min_interval_s = Clamp(s.vmd_min_interval_s,1,      3600);
     s.vmd_check_fps      = Clamp(s.vmd_check_fps,     1,      30);
+    s.light_mode         = Clamp(s.light_mode,        0,      1);
+    s.light_start_hour   = Clamp(s.light_start_hour,  0,      23);
+    s.light_end_hour     = Clamp(s.light_end_hour,    0,      23);
+    s.light_sound_thresh = Clamp(s.light_sound_thresh,0,      100);
+    s.light_sound_scale_version = 3;  // 当前唯一合法量程版本
+    s.light_hold_s       = Clamp(s.light_hold_s,      1,      3600);
+    // GPIO 编号：V831 主 PIO(pio) base=0 ngpio=288，合法范围 [0,287]；越界回退默认 237(PH13)
+    if (s.light_gpio < 0 || s.light_gpio > 287) s.light_gpio = 237;
     s.mqtt_broker_port   = Clamp(s.mqtt_broker_port,  1,      65535);
     s.mqtt_poll_sec      = Clamp(s.mqtt_poll_sec,     2,      3600);
     // 0 = 关闭保活；非 0 时下限 60s（避免误配成几秒频繁重报），上限 24h
@@ -214,11 +245,34 @@ bool C_AppConfig::LoadFromFile_locked()
         CLOG_ERR("AppConfig: parse %s failed; reverting to defaults\n", m_path.c_str());
         return false;
     }
+    bool hasSoundThreshold = false;
+    bool hasSoundScaleVersion = false;
     for (const auto& p : kv) {
+        if (p.first == "light_sound_thresh") hasSoundThreshold = true;
+        if (p.first == "light_sound_scale_version") hasSoundScaleVersion = true;
         if (!AssignKv(m_snap, p.first, p.second)) {
             CLOG_INF("AppConfig: skip unknown key in %s: %s\n",
                      m_path.c_str(), p.first.c_str());
         }
+    }
+
+    // v3 在 v2 的低响度结果上再放大 5 倍，并把公开范围封顶为 100。
+    // v2 阈值乘 5；v1/无版本相对 v3 的总倍率是 50。只有配置文件确实
+    // 保存过旧阈值时才换算；没有该字段则保留当前默认值 35。
+    const int loadedScaleVersion = hasSoundScaleVersion
+        ? m_snap.light_sound_scale_version : 1;
+    if (loadedScaleVersion < 3) {
+        if (hasSoundThreshold) {
+            const int oldThresh = m_snap.light_sound_thresh;
+            const int multiplier = loadedScaleVersion < 2 ? 50 : 5;
+            const long long scaled = (long long)oldThresh * multiplier;
+            m_snap.light_sound_thresh = (int)Clamp<long long>(scaled, 0, 100);
+            CLOG_INF("AppConfig: migrate light sound threshold %d -> %d "
+                     "(scale v%d -> v3)\n",
+                     oldThresh, m_snap.light_sound_thresh, loadedScaleVersion);
+        }
+        m_snap.light_sound_scale_version = 3;
+        m_needsSave = true;
     }
     return true;
 }
@@ -250,6 +304,15 @@ bool C_AppConfig::SaveToFile_locked() const
         << "  \"osd_show_ip\":        " << (m_snap.osd_show_ip   ? "true" : "false") << ",\n"
         << "  \"osd_show_time\":      " << (m_snap.osd_show_time ? "true" : "false") << ",\n"
         << "  \"osd_show_ai_box\":    " << (m_snap.osd_show_ai_box ? "true" : "false") << ",\n"
+        << "  \"light_enabled\":      " << (m_snap.light_enabled ? "true" : "false") << ",\n"
+        << "  \"light_mode\":         " << m_snap.light_mode << ",\n"
+        << "  \"light_start_hour\":   " << m_snap.light_start_hour << ",\n"
+        << "  \"light_end_hour\":     " << m_snap.light_end_hour << ",\n"
+        << "  \"light_sound_thresh\": " << m_snap.light_sound_thresh << ",\n"
+        << "  \"light_sound_scale_version\": " << m_snap.light_sound_scale_version << ",\n"
+        << "  \"light_hold_s\":       " << m_snap.light_hold_s << ",\n"
+        << "  \"light_gpio\":         " << m_snap.light_gpio << ",\n"
+        << "  \"light_active_low\":   " << (m_snap.light_active_low ? "true" : "false") << ",\n"
         << "  \"mqtt_enabled\":       " << (m_snap.mqtt_enabled ? "true" : "false") << ",\n"
         << "  \"mqtt_broker_host\":   \"" << m_snap.mqtt_broker_host << "\",\n"
         << "  \"mqtt_broker_port\":   " << m_snap.mqtt_broker_port << ",\n"

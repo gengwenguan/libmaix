@@ -15,9 +15,15 @@
 #include "logAdapt.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+
+// 麦克风实时响度（0~100）。AAC 采集线程每 20ms 用一段 S16 PCM 的 RMS 更新，
+// 其它模块（补光灯声控）无锁读取。定义在此、声明在 aacEnc.h。
+static std::atomic<int> g_micLoudness{0};
+int AacEnc_GetMicLoudness() { return g_micLoudness.load(std::memory_order_relaxed); }
 
 #define PRINT_ERROR(errnum) do { \
     char errbuf[AV_ERROR_MAX_STRING_SIZE]; \
@@ -184,21 +190,11 @@ C_AacEnc::C_AacEnc(C_Listener* pListener)
         }
     }
     InitPcmDump();
-
-    m_bRun = true;
-    m_pCaptureEncoderThread = std::unique_ptr<std::thread>(
-        new std::thread([this]() { this->CaptureEncoder(); })
-    );
-    CLOG_INF("AAC encoder started: %uHz %uch %ukbps\n",
-             kSampleRate, kChannels, kBitRate / 1000);
 }
 
 C_AacEnc::~C_AacEnc()
 {
-    m_bRun = false;
-    if (m_pCaptureEncoderThread && m_pCaptureEncoderThread->joinable()) {
-        m_pCaptureEncoderThread->join();
-    }
+    Stop();
 
     if (m_fifo)        { av_audio_fifo_free(m_fifo); m_fifo = nullptr; }
     if (m_swr)         { swr_free(&m_swr); }
@@ -208,6 +204,49 @@ C_AacEnc::~C_AacEnc()
     ClosePcmDump();
 
     CLOG_INF("~C_AacEnc end\n");
+}
+
+int C_AacEnc::Start()
+{
+    if (!m_capture_handle || !m_codec_ctx || !m_swr || !m_fifo || m_ascLen == 0) {
+        CLOG_ERR("AAC encoder cannot start: initialization incomplete\n");
+        return -1;
+    }
+    if (snd_pcm_prepare(m_capture_handle) < 0) {
+        CLOG_ERR("AAC capture device prepare failed\n");
+        return -1;
+    }
+
+    bool expected = false;
+    if (!m_bRun.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return 0;
+    }
+
+    try {
+        m_pCaptureEncoderThread.reset(
+            new std::thread([this]() { this->CaptureEncoder(); }));
+    } catch (...) {
+        m_bRun.store(false, std::memory_order_release);
+        CLOG_ERR("AAC encoder thread creation failed\n");
+        return -1;
+    }
+
+    CLOG_INF("AAC encoder started: %uHz %uch %ukbps\n",
+             kSampleRate, kChannels, kBitRate / 1000);
+    return 0;
+}
+
+void C_AacEnc::Stop()
+{
+    const bool wasRunning = m_bRun.exchange(false, std::memory_order_acq_rel);
+    if (wasRunning && m_capture_handle) {
+        // snd_pcm_readi 可能阻塞；drop 会唤醒读取，使线程及时观察退出标志。
+        snd_pcm_drop(m_capture_handle);
+    }
+    if (m_pCaptureEncoderThread && m_pCaptureEncoderThread->joinable()) {
+        m_pCaptureEncoderThread->join();
+    }
+    m_pCaptureEncoderThread.reset();
 }
 
 const unsigned char* C_AacEnc::GetAudioSpecificConfig(unsigned int* outLen) const
@@ -465,8 +504,9 @@ void C_AacEnc::CaptureEncoder()
         return;
     }
 
-    while (m_bRun) {
+    while (m_bRun.load(std::memory_order_acquire)) {
         int err = snd_pcm_readi(m_capture_handle, captureBuf.get(), kAlsaPeriod);
+        if (!m_bRun.load(std::memory_order_acquire)) break;
         if (err == -EPIPE) {
             CLOG_ERR("ALSA underrun, recovering\n");
             snd_pcm_prepare(m_capture_handle);
@@ -478,6 +518,24 @@ void C_AacEnc::CaptureEncoder()
 
         const int framesRead = err;
         WritePcmDump(captureBuf.get(), (unsigned int)framesRead);
+
+        // 实时响度（RMS→0~100）：在滤波前的原始 PCM 上算，最贴近真实环境声。
+        // 在上一版 0~1000 线性结果上再放大 5 倍后封顶 100，让低响度区间
+        // 可用整数阈值细调。开销仅一遍平方和，占 20ms 周期极小比例。
+        if (framesRead > 0) {
+            const short* s = captureBuf.get();
+            double sumSq = 0.0;
+            for (int i = 0; i < framesRead; ++i) {
+                double v = (double)s[i];
+                sumSq += v * v;
+            }
+            double rms = std::sqrt(sumSq / (double)framesRead);   // 0~32767
+            // 相比 v2 再放大 5 倍：v2 的 7 对应 v3 的 35，最终封顶 100。
+            int loud = (int)(rms / 32767.0 * 5000.0 + 0.5);
+            if (loud < 0) loud = 0; else if (loud > 100) loud = 100;
+            g_micLoudness.store(loud, std::memory_order_relaxed);
+        }
+
         ApplyMicFilter(captureBuf.get(), (unsigned int)framesRead);
 
         // S16 → FLTP
@@ -502,6 +560,7 @@ void C_AacEnc::CaptureEncoder()
         av_freep(&convertedData);
     }
     CLOG_INF("AAC CaptureEncoder exit\n");
+    g_micLoudness.store(0, std::memory_order_relaxed);   // 采集停后响度归零，避免声控读到陈旧值
 }
 
 void C_AacEnc::EncodeOneFrame()

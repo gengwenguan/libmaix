@@ -10,6 +10,7 @@
 #include<memory>
 #include<iostream>
 #include<vector>
+#include<atomic>
 #include "vencoder.h"
 
 class C_H264Enc
@@ -43,8 +44,7 @@ public:
     int InputData(unsigned char* inputData);
     //强制编码一帧关键帧，此处进行标记，实际在送数据时进行控制强制I帧
     void ForceIframe(){
-        std::cout << "ForceIframe()" << std::endl;
-        m_forceIframe = true;
+        m_forceIframe.store(true, std::memory_order_release);
     }
 
     // 获取启动时缓存好的 SPS+PPS（Annex-B 格式，含 0x00000001 startcode）
@@ -81,7 +81,7 @@ private:
     VencInputBuffer m_inputBuffer;
     VencOutputBuffer m_outputBuffer;
     VencHeaderData m_sps_pps_data;
-    bool           m_forceIframe = true;
+    std::atomic<bool> m_forceIframe{true};
 
     // 周期性强制 IDR 计数：硬编码器 nMaxKeyInterval 在 V83x 平台不可靠
     // 由我们每 30 帧（≈1s @30fps）主动 ForceIframe 一次

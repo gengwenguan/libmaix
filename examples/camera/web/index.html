@@ -3,282 +3,266 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Camera 监控系统</title>
-    <link rel="icon" href="/favicon.ico?v=20260525" sizes="any">
-    <style>
-        :root {
-            --bg-grad-1:#1e3c72; --bg-grad-2:#2a5298;
-            --panel-bg: rgba(0,0,0,.25);
-            --panel-bg-2: rgba(0,0,0,.35);
-            --line: #ffffff20;
-            --accent: #5db8ff;
-            --accent-hover: #8ad0ff;
-        }
-        * { box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
-               background: linear-gradient(135deg, var(--bg-grad-1), var(--bg-grad-2));
-               color:#fff; margin:0; padding:16px; min-height:100vh; }
-        h1   { margin: 0 0 12px; font-size:20px; }
-        .wrap{ max-width: 1080px; margin: 0 auto; }
-
-        /* Tabs */
-        .tabs { display:flex; gap:4px; padding:4px; background:var(--panel-bg);
-                border-radius:10px 10px 0 0; border-bottom: 1px solid var(--line); }
-        .tab  { flex:1; padding:10px 16px; text-align:center; cursor:pointer;
-                background: transparent; color:#cfd8e6; border:0; border-radius:8px;
-                font-size:14px; transition: all .15s; }
-        .tab:hover { color:#fff; background: rgba(255,255,255,.06); }
-        .tab.active { background: var(--accent); color:#0b2237; font-weight:600; }
-
-        /* ===== 设置 Tab ===== */
-        .cfg-section { border:1px solid #2a3a55; border-radius:8px;
-                       padding:10px 14px 14px; margin-bottom:14px;
-                       background:rgba(255,255,255,.02); }
-        .cfg-section legend { padding:0 6px; color:var(--accent); font-weight:600; }
-        .cfg-row { display:flex; align-items:center; gap:10px; margin:8px 0; flex-wrap:wrap; }
-        .cfg-row label { display:flex; align-items:center; gap:6px; min-width:200px; }
-        .cfg-row input[type="number"], .cfg-row select { width:120px; padding:4px 8px;
-                                                         background:#1c2740; color:#fff;
-                                                         border:1px solid #2c3c5b; border-radius:4px; }
-        .cfg-row select { width:240px; }
-        .cfg-row input[type="checkbox"] { width:16px; height:16px; }
-        .hint-inline { color:#8aa1bf; font-size:12px; }
-        .panes { background: var(--panel-bg); border-radius:0 0 12px 12px;
-                 padding:16px; min-height: 420px; }
-        .pane { display:none; }
-        .pane.active { display:block; }
-
-        /* common */
-        video{ width:100%; background:#000; border-radius:8px; }
-
-        /* 实况画面叠加层：把 <video> 包进相对定位容器，右上角浮一个本地实时
-           时钟（秒级，格式同开发板烧录）。开发板把"采集时刻"烧进画面左下角，
-           两者之差≈端到端直播延迟，可肉眼逐位比对。 */
-        .live-stage { position: relative; }
-        #liveClock  { position: absolute; right: 10px; top: 10px;
-                      padding: 4px 10px; background: rgba(0,0,0,.55);
-                      color: #7CFC00; font-family: ui-monospace, Menlo, Consolas, monospace;
-                      font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600;
-                      letter-spacing: .5px;
-                      border-radius: 4px; pointer-events: none;
-                      text-shadow: 0 1px 2px rgba(0,0,0,.6); }
-        button, select, input[type="date"] {
-            background:#2a5298; color:#fff; border:0; padding:8px 14px;
-            border-radius:6px; cursor:pointer; font-size:13px;
-        }
-        button:hover{ background:#3a6dc8; }
-        button:disabled { opacity:.5; cursor: not-allowed; }
-        #btnTalk.on { background:#e23; box-shadow:0 0 8px #e23;
-                      animation: blink 1s infinite; }
-        select, input[type="date"] {
-            background:#16335c; padding:8px 10px; border:1px solid #3a6dc8;
-        }
-        .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-        .stat { font-size: 13px; opacity: .85; }
-        .muted{ opacity:.6; }
-        .hint { font-size:12px; opacity:.7; padding:6px 0; }
-
-        /* live tab */
-        #log { margin-top:12px; height:140px; overflow:auto; background:#0008;
-               padding:8px; border-radius:6px; font-family: monospace; font-size: 12px; }
-        .rec-dot { display:inline-block; width:10px; height:10px; border-radius:50%;
-                   background:#888; vertical-align:middle; margin-right:6px; }
-        .rec-dot.on { background:#e23; box-shadow:0 0 8px #e23;
-                      animation: blink 1s infinite; }
-        @keyframes blink { 50% { opacity: .25; } }
-
-        /* playback tab */
-        .pb-toolbar { display:flex; gap:10px; flex-wrap:wrap; align-items:center;
-                      padding:8px 0 12px; }
-        /* 给 video 显式锁定宽高，避免切换 src 时（loadstart 阶段）控件因
-           intrinsic size 变 0 而瞬间塌缩 → 撑大，造成跳转视觉抖动。
-           background:#000 让"还没首帧"的几十毫秒里也是黑底而不是白闪。 */
-        #pbVideo  { width: 100%; height: 420px; max-height: 60vh;
-                    object-fit: contain; background: #000;
-                    display: block; }
-        /* 自定义时间叠加层（Q1）：覆盖在 <video> 左上角，显示
-           "片段开始日期 + currentTime" 拼出的绝对时刻；比浏览器原生
-           "28:10 / 30:01" 这种相对时长更直观。
-           - position: absolute 相对外层 .pb-stage 定位
-           - pointer-events: none 让鼠标事件穿透到下面的 <video> 控件
-           - tabular-nums 让数字等宽避免抖动 */
-        .pb-stage { position: relative; }
-        #pbClock  { position: absolute; left: 10px; top: 10px;
-                    padding: 4px 10px; background: rgba(0,0,0,.55);
-                    color: #fff; font-family: ui-monospace, Menlo, Consolas, monospace;
-                    font-variant-numeric: tabular-nums; font-size: 13px;
-                    border-radius: 4px; pointer-events: none;
-                    text-shadow: 0 1px 2px rgba(0,0,0,.6);
-                    display: none; }
-        #pbInfo   { font-size: 13px; opacity:.85; padding-top:6px; }
-
-        /* 24h 时间轴 */
-        .timeline-wrap { margin-top:12px; user-select:none; }
-        #timeline { width:100%; height:56px; background:#0a1830; border-radius:6px;
-                    display:block; cursor: crosshair; }
-        .tl-tip { position:absolute; padding:4px 8px; background:#000c; color:#fff;
-                  border-radius:4px; font-size:12px; pointer-events:none;
-                  transform: translate(-50%, -120%); white-space:nowrap; }
-
-        #segList  { margin-top:10px; max-height: 200px; overflow:auto;
-                    background:#0008; border-radius:6px; padding:6px; font-size:13px; }
-        #segList .it { display:flex; gap:8px; align-items:center; padding:6px;
-                       border-bottom:1px solid var(--line); cursor:pointer; }
-        #segList .it:last-child { border-bottom:0; }
-        #segList .it:hover { background:#ffffff10; }
-        #segList .it.on   { background: var(--accent); color:#0b2237; font-weight:600; }
-        #segList .hms { font-family: monospace; min-width: 80px; }
-        #segList .sz  { opacity:.7; font-size:12px; min-width: 80px; text-align:right; }
-        #segList .nm  { flex:1; opacity:.7; font-family: monospace; word-break:break-all; }
-        #segList .it.on .sz, #segList .it.on .nm { opacity: 1; }
-        /* 分片行右侧的下载按钮：纯前端 a[download]，与播放区分开
-           click 事件在 JS 里 stopPropagation，避免触发整行的"播放"逻辑 */
-        #segList .dl { width: 28px; height: 24px; border-radius: 4px;
-                       display:inline-flex; align-items:center; justify-content:center;
-                       background: #ffffff15; color:#fff; font-size:14px;
-                       text-decoration:none; cursor:pointer; }
-        #segList .dl:hover { background: var(--accent); color:#0b2237; }
-        #segList .it.on .dl { background:#0b2237; color:#fff; }
-        #segList .it.on .dl:hover { background:#000; color:#fff; }
-
-        /* album tab */
-        .album-toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center;
-                         padding:4px 0 12px; }
-        #albumGrid { display:grid; grid-template-columns: repeat(auto-fill,minmax(160px,1fr));
-                     gap:10px; margin-top:8px; }
-        .ph { position:relative; background:#0008; border-radius:6px; overflow:hidden;
-              cursor:pointer; aspect-ratio: 4/3; }
-        .ph img { width:100%; height:100%; object-fit: cover; display:block; }
-        .ph .meta{ position:absolute; left:0; right:0; bottom:0;
-                   background: linear-gradient(transparent, rgba(0,0,0,.7));
-                   color:#fff; font-size:11px; padding:14px 6px 4px;
-                   font-family: monospace; }
-        .ph .chk { position:absolute; top:6px; left:6px; width:18px; height:18px;
-                   border-radius:4px; background:#0008; border:1.5px solid #fff;
-                   display:flex; align-items:center; justify-content:center;
-                   color:#fff; font-size:14px; line-height:1; }
-        .ph.sel { outline: 3px solid var(--accent); }
-        .ph.sel .chk { background: var(--accent); border-color:var(--accent); color:#0b2237; }
-        .ph .chk:before { content:""; }
-        .ph.sel .chk:before { content:"✓"; }
-        #lightbox { position:fixed; inset:0; background:#000d; display:none;
-                    align-items:center; justify-content:center; z-index:100; cursor: zoom-out; }
-        #lightbox img { max-width:92vw; max-height:92vh; border-radius:6px; }
-        /* lightbox 右下角的下载按钮：与背景关闭区分开，stopPropagation */
-        #lbDownload { position: fixed; right: 24px; bottom: 24px; z-index: 101;
-                      padding: 10px 16px; background: var(--accent); color:#0b2237;
-                      border-radius: 6px; font-size: 14px; font-weight: 600;
-                      text-decoration:none; cursor:pointer; box-shadow: 0 2px 6px #0008; }
-        #lbDownload:hover { background:#fff; }
-
-        /* album tab placeholder */
-        .placeholder { padding:40px 20px; text-align:center; opacity:.7; font-size:14px; }
-    </style>
+    <title>设备监控台</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=20260718">
+    <link rel="alternate icon" href="/favicon.ico?v=20260718" sizes="16x16 32x32 48x48">
+    <link rel="stylesheet" href="style.css?v=20260716">
 </head>
 <body>
 <div class="wrap">
-    <h1>Camera 监控系统</h1>
+    <header class="app-header">
+        <div class="brand">
+            <div class="brand-mark" aria-hidden="true"></div>
+            <div>
+                <p class="eyebrow">Edge Camera Console</p>
+                <h1>设备监控台</h1>
+            </div>
+        </div>
+        <div id="deviceChip" class="device-chip" data-state="idle">连接设备中</div>
+    </header>
 
-    <div class="tabs" id="tabs">
-        <button class="tab active" data-tab="live">实况</button>
-        <button class="tab"        data-tab="playback">回放</button>
-        <button class="tab"        data-tab="album">相册</button>
-        <button class="tab"        data-tab="settings">设置</button>
-    </div>
+    <nav class="tabs" id="tabs" role="tablist" aria-label="功能导航">
+        <button id="tab-live" class="tab active" data-tab="live" role="tab"
+                aria-selected="true" aria-controls="pane-live">实况</button>
+        <button id="tab-playback" class="tab" data-tab="playback" role="tab"
+                aria-selected="false" aria-controls="pane-playback">回放</button>
+        <button id="tab-album" class="tab" data-tab="album" role="tab"
+                aria-selected="false" aria-controls="pane-album">相册</button>
+        <button id="tab-settings" class="tab" data-tab="settings" role="tab"
+                aria-selected="false" aria-controls="pane-settings">设置</button>
+    </nav>
 
-    <div class="panes">
+    <main class="panes">
 
         <!-- ============ 实况 Tab ============ -->
-        <div class="pane active" id="pane-live">
-            <div class="live-stage">
-                <video id="v" autoplay muted playsinline controls></video>
-                <div id="liveClock">---------- --:--:--</div>
+        <section class="pane active" id="pane-live" role="tabpanel" aria-labelledby="tab-live">
+            <div class="pane-header">
+                <div>
+                    <h2 class="pane-title">实时画面</h2>
+                    <p class="pane-subtitle">低延迟视频、现场声音与设备快捷操作</p>
+                </div>
+                <span class="status-chip" id="stat" data-state="idle">未连接</span>
             </div>
-            <div class="row" style="margin-top:12px;">
-                <button id="btnStart">▶ 开始</button>
-                <button id="btnStop">⏹ 停止</button>
-                <button id="btnUnmute">🔇 取消静音</button>
-                <button id="btnSnap">📷 拍照</button>
-                <button id="btnDoor" title="让开发板播放“放门口”提示音">🔔 放门口</button>
-                <button id="btnTalk" style="display:none;">🎤 讲话</button>
-                <span class="stat" id="stat">未连接</span>
-                <span style="flex:1"></span>
-                <span class="stat">
-                    <span id="recDot" class="rec-dot"></span>
-                    <span id="recStat">监控录像状态查询中…</span>
-                </span>
+            <div class="live-layout">
+                <div class="live-main">
+                    <div class="live-stage">
+                        <video id="v" autoplay muted controls playsinline webkit-playsinline
+                               disableRemotePlayback x-webkit-airplay="deny" preload="auto"></video>
+                        <div class="stage-topline">
+                            <span></span>
+                            <div id="liveClock">---------- --:--:--</div>
+                        </div>
+                    </div>
+                    <div id="snapTip" aria-live="polite"></div>
+                    <div class="live-controls">
+                        <div class="card action-card">
+                            <p class="card-label">直播控制</p>
+                            <div class="live-actions">
+                                <button id="btnLive" class="btn-toggle-live">开始直播</button>
+                                <button id="btnSnap">立即拍照</button>
+                                <button id="btnUnmute">开启声音</button>
+                                <button id="btnTalk" hidden>讲话</button>
+                                <button id="btnDoor" title="让设备播放“放门口”提示音">播放提示音</button>
+                            </div>
+                        </div>
+                        <div class="card action-card" id="deviceActionCard">
+                            <p class="card-label">设备动作</p>
+                            <p class="card-hint">点击按钮让设备向对应 URL 发起 POST（如开门 / 开灯 / 关灯）。仅支持 http:// 局域网地址。</p>
+                            <div id="actionBtns" class="action-btn-grid">
+                                <span id="actionEmpty" class="action-empty">暂无动作，请在下方添加</span>
+                            </div>
+                            <div id="actionTip" class="action-tip" aria-live="polite"></div>
+                            <details class="action-manage">
+                                <summary>管理动作</summary>
+                                <div class="action-add-form">
+                                    <input id="actionName" type="text" maxlength="32"
+                                           placeholder="按钮名（如：开门）" autocomplete="off">
+                                    <input id="actionUrl" type="url" maxlength="512"
+                                           placeholder="http://192.168.1.50/open" autocomplete="off"
+                                           inputmode="url">
+                                    <div class="action-form-btns">
+                                        <button id="actionAdd" class="btn-primary">添加</button>
+                                        <button id="actionCancel" class="btn-quiet" hidden>取消</button>
+                                    </div>
+                                </div>
+                                <ul id="actionList" class="action-list"></ul>
+                            </details>
+                        </div>
+                    </div>
+                </div>
+                <aside class="live-side" aria-label="设备状态">
+                    <div class="card status-card">
+                        <p class="card-label">设备状态</p>
+                        <dl class="status-list">
+                            <div class="status-row">
+                                <dt>录像</dt>
+                                <dd>
+                                    <span id="recDot" class="rec-dot"></span>
+                                    <span id="recStat">查询中</span>
+                                </dd>
+                            </div>
+                            <div class="status-row">
+                                <dt>传输</dt>
+                                <dd>fMP4 / WebSocket</dd>
+                            </div>
+                            <div class="status-row">
+                                <dt>视频</dt>
+                                <dd>640 × 480 · H.264</dd>
+                            </div>
+                            <div class="status-row">
+                                <dt>IPv4</dt>
+                                <dd class="net-addr" id="netIpv4">查询中</dd>
+                            </div>
+                            <div class="status-row">
+                                <dt>IPv6</dt>
+                                <dd class="net-addr" id="netIpv6">查询中</dd>
+                            </div>
+                            <div class="status-row metered">
+                                <dt>CPU</dt>
+                                <dd>
+                                    <span id="sysCpu">查询中</span>
+                                    <span class="meter"><i id="sysCpuBar"></i></span>
+                                </dd>
+                            </div>
+                            <div class="status-row metered">
+                                <dt>内存</dt>
+                                <dd>
+                                    <span id="sysMem">查询中</span>
+                                    <span class="meter"><i id="sysMemBar"></i></span>
+                                </dd>
+                            </div>
+                            <div class="status-row metered">
+                                <dt>进程内存</dt>
+                                <dd>
+                                    <span id="sysProc">查询中</span>
+                                    <span class="meter"><i id="sysProcBar"></i></span>
+                                </dd>
+                            </div>
+                            <div class="status-row metered">
+                                <dt>存储</dt>
+                                <dd>
+                                    <span id="sysDisk">查询中</span>
+                                    <span class="meter"><i id="sysDiskBar"></i></span>
+                                </dd>
+                            </div>
+                            <div class="status-row">
+                                <dt>进程运行</dt>
+                                <dd id="sysProcUptime">查询中</dd>
+                            </div>
+                            <div class="status-row">
+                                <dt>系统运行</dt>
+                                <dd id="sysUptime">查询中</dd>
+                            </div>
+                        </dl>
+                    </div>
+                </aside>
             </div>
-            <div id="snapTip" class="hint" style="min-height:18px;"></div>
-            <div id="log"></div>
-            <div class="hint">
+            <details class="diagnostics">
+                <summary>连接诊断日志</summary>
+                <div id="log"></div>
+            </details>
+            <details class="diagnostics" id="deviceLogBox">
+                <summary>设备运行日志<span class="dev-log-state" id="devLogState"></span></summary>
+                <div id="devLog"></div>
+            </details>
+            <div class="hint-box">
                 监控录像默认常驻：进程启动即开始录像，按 10 分钟分片并按天分目录（<code>record/YYYYMMDD/...</code>），
                 到期自动清理（保留 7 天 + 容量上限双兜底），无需手动 start/stop。
             </div>
-        </div>
+        </section>
 
         <!-- ============ 回放 Tab ============ -->
-        <div class="pane" id="pane-playback">
-            <div class="pb-toolbar">
-                <span>日期：</span>
-                <select id="pbDate"><option>加载中…</option></select>
-                <button id="pbRefresh">刷新</button>
-                <span class="stat" id="pbCount"></span>
-                <span style="flex:1"></span>
-                <span>倍速：</span>
-                <select id="pbSpeed" title="回放倍速；>2x 自动静音，避免高速音频失真">
-                    <option value="1">1x</option>
-                    <option value="2">2x</option>
-                    <option value="4">4x</option>
-                    <option value="8">8x</option>
-                    <option value="16">16x</option>
-                </select>
-                <button id="pbPrev"  title="上一片">⟵ 上一片</button>
-                <button id="pbNext"  title="下一片">下一片 ⟶</button>
+        <section class="pane" id="pane-playback" role="tabpanel" aria-labelledby="tab-playback" hidden>
+            <div class="pane-header">
+                <div>
+                    <h2 class="pane-title">录像回放</h2>
+                    <p class="pane-subtitle">按日期和时间轴快速定位设备录像</p>
+                </div>
+                <span class="status-chip" id="pbCount" data-state="idle">等待加载</span>
+            </div>
+            <div class="toolbar pb-toolbar">
+                <div class="toolbar-group">
+                    <span class="toolbar-label">日期</span>
+                    <select id="pbDate" aria-label="录像日期"><option>加载中…</option></select>
+                    <button id="pbRefresh" class="btn-quiet">刷新</button>
+                </div>
+                <div class="toolbar-group">
+                    <span class="toolbar-label">倍速</span>
+                    <select id="pbSpeed" aria-label="回放倍速" title="回放倍速；>2x 自动静音，避免高速音频失真">
+                        <option value="1">1x</option>
+                        <option value="2">2x</option>
+                        <option value="4">4x</option>
+                        <option value="8">8x</option>
+                        <option value="16">16x</option>
+                    </select>
+                    <button id="pbPrev" title="上一片">上一片</button>
+                    <button id="pbNext" title="下一片">下一片</button>
+                </div>
             </div>
             <div class="pb-stage">
-                <video id="pbVideo" controls playsinline></video>
+                <video id="pbVideo" controls playsinline webkit-playsinline
+                       disableRemotePlayback x-webkit-airplay="deny" preload="metadata"></video>
                 <div id="pbClock"></div>
             </div>
             <div id="pbInfo" class="muted">请选择日期与分片开始回放</div>
-            <div class="timeline-wrap" style="position:relative;">
+            <div class="timeline-wrap">
                 <canvas id="timeline" width="1080" height="56"></canvas>
-                <div id="tlTip" class="tl-tip" style="display:none;"></div>
+                <div id="tlTip" class="tl-tip" hidden></div>
             </div>
-            <div id="segList"><div class="muted" style="padding:6px">暂无</div></div>
-            <div class="hint">
+            <div id="segList"><div class="placeholder">暂无录像</div></div>
+            <div class="hint-box">
                 时间轴：横轴为 0:00 ～ 24:00，蓝色色块表示已录像时段，红线为当前播放位置；点击任意位置即可定位。
                 分片切换会重新加载播放器（约 0.5 秒黑屏），当前片快结束会预拉下一片。
             </div>
-        </div>
+        </section>
 
         <!-- ============ 相册 Tab ============ -->
-        <div class="pane" id="pane-album">
-            <div class="album-toolbar">
-                <button id="abRefresh">刷新</button>
-                <button id="abSelAll">全选</button>
-                <button id="abSelNone">取消选择</button>
-                <button id="abDownload">下载所选</button>
-                <button id="abDelete" style="background:#a33;">删除选中</button>
-                <span class="stat" id="abStat">加载中…</span>
+        <section class="pane" id="pane-album" role="tabpanel" aria-labelledby="tab-album" hidden>
+            <div class="pane-header">
+                <div>
+                    <h2 class="pane-title">设备相册</h2>
+                    <p class="pane-subtitle">管理手动抓拍、AI 和移动侦测照片</p>
+                </div>
+                <span class="status-chip" id="abStat" data-state="idle">等待加载</span>
+            </div>
+            <div class="toolbar album-toolbar">
+                <div class="toolbar-group">
+                    <button id="abRefresh" class="btn-quiet">刷新</button>
+                    <button id="abSelAll">全选</button>
+                    <button id="abSelNone">取消选择</button>
+                </div>
+                <div class="toolbar-group">
+                    <button id="abDownload">下载所选</button>
+                    <button id="abDelete" class="btn-danger">删除选中</button>
+                </div>
             </div>
             <div id="albumGrid"></div>
-            <div id="albumEmpty" class="placeholder" style="display:none;">
-                还没有照片，去「实况」Tab 点击 📷 拍照按钮试试
+            <div id="albumEmpty" class="placeholder" hidden>
+                还没有照片，可在「实况」中执行拍照
             </div>
-        </div>
+        </section>
 
         <!-- ============ 设置 Tab ============ -->
-        <div class="pane" id="pane-settings">
-            <div class="row" style="margin-bottom:8px;">
-                <button id="cfgReload">重新加载</button>
-                <button id="cfgSave">保存</button>
-                <span class="stat" id="cfgStat">未加载</span>
+        <section class="pane" id="pane-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
+            <div class="pane-header">
+                <div>
+                    <h2 class="pane-title">设备设置</h2>
+                    <p class="pane-subtitle">配置检测、录像、相册、音频与网络行为</p>
+                </div>
+            </div>
+            <div class="cfg-actions">
+                <span class="status-chip" id="cfgStat" data-state="idle">未加载</span>
+                <div class="row">
+                    <button id="cfgReload" class="btn-quiet">重新加载</button>
+                    <button id="cfgSave" class="btn-primary">保存设置</button>
+                </div>
             </div>
 
+            <div class="settings-grid">
             <fieldset class="cfg-section">
                 <legend>AI 人形识别（自动拍照）</legend>
                 <div class="cfg-row">
-                    <label><input type="checkbox" id="cfg_ai_enabled"> 启用人形识别 → 自动拍照</label>
+                    <label class="toggle-label"><input type="checkbox" id="cfg_ai_enabled"> 启用人形识别 → 自动拍照</label>
                 </div>
                 <div class="cfg-row">
                     <label>置信度阈值
@@ -308,7 +292,7 @@
             <fieldset class="cfg-section">
                 <legend>移动侦测 VMD（与 AI 平行；纯 CPU 帧差）</legend>
                 <div class="cfg-row">
-                    <label><input type="checkbox" id="cfg_vmd_enabled"> 启用移动侦测 → 自动拍照</label>
+                    <label class="toggle-label"><input type="checkbox" id="cfg_vmd_enabled"> 启用移动侦测 → 自动拍照</label>
                 </div>
                 <div class="cfg-row">
                     <label>像素差阈值
@@ -400,21 +384,73 @@
             <fieldset class="cfg-section">
                 <legend>OSD（视频上叠加文字）</legend>
                 <div class="cfg-row">
-                    <label><input type="checkbox" id="cfg_osd_show_ip"> 显示 IP 地址</label>
+                    <label class="toggle-label"><input type="checkbox" id="cfg_osd_show_ip"> 显示 IP 地址</label>
                 </div>
                 <div class="cfg-row">
-                    <label><input type="checkbox" id="cfg_osd_show_time"> 显示日期时间</label>
+                    <label class="toggle-label"><input type="checkbox" id="cfg_osd_show_time"> 显示日期时间</label>
                 </div>
                 <div class="cfg-row">
-                    <label><input type="checkbox" id="cfg_osd_show_ai_box"> 显示 AI 检测框</label>
+                    <label class="toggle-label"><input type="checkbox" id="cfg_osd_show_ai_box"> 显示 AI 检测框</label>
                     <span class="hint-inline">仅在 AI 检测开启时生效</span>
                 </div>
             </fieldset>
 
             <fieldset class="cfg-section">
+                <legend>补光灯（外接 LED，GPIO 控制）</legend>
+                <div class="cfg-row">
+                    <label class="toggle-label"><input type="checkbox" id="cfg_light_enabled"> 启用补光灯</label>
+                    <span class="hint-inline">关闭时确保灯灭</span>
+                </div>
+                <div class="cfg-row">
+                    <label>工作模式
+                        <select id="cfg_light_mode">
+                            <option value="0">时段内常亮</option>
+                            <option value="1">时段内声控触发</option>
+                        </select>
+                    </label>
+                    <span class="hint-inline">声控：时段内有声音才亮，持续一段时间</span>
+                </div>
+                <div class="cfg-row">
+                    <label>点亮起始(时)
+                        <input type="number" id="cfg_light_start_hour" step="1" min="0" max="23">
+                    </label>
+                    <label>结束(时)
+                        <input type="number" id="cfg_light_end_hour" step="1" min="0" max="23">
+                    </label>
+                    <span class="hint-inline">0~23；支持跨零点（如 18→6 表示傍晚到清晨）；起=止表示全天</span>
+                </div>
+                <div class="cfg-row">
+                    <label>声控响度阈值
+                        <input type="number" id="cfg_light_sound_thresh" step="1" min="0" max="100">
+                    </label>
+                    <span class="hint-inline">0~100；响度再放大 5 倍（当前 7 对应新 35），可按 1 精细调整</span>
+                </div>
+                <div class="cfg-row">
+                    <label>触发持续(秒)
+                        <input type="number" id="cfg_light_hold_s" step="1" min="1" max="3600">
+                    </label>
+                    <span class="hint-inline">声控触发后持续点亮的时长；期间再有声音会续期</span>
+                </div>
+                <div class="cfg-row">
+                    <label>控制 GPIO 号
+                        <input type="number" id="cfg_light_gpio" step="1" min="0" max="287">
+                    </label>
+                    <span class="hint-inline">PH13=237（默认，推荐）；PH14=238 与板载 State LED 共用</span>
+                </div>
+                <div class="cfg-row">
+                    <label class="toggle-label"><input type="checkbox" id="cfg_light_active_low"> 低电平点亮</label>
+                    <span class="hint-inline">默认高电平点亮；灯板逻辑相反时勾选</span>
+                </div>
+                <div class="hint">
+                    GPIO 仅输出 3.3V 控制信号到灯板 DO，灯板需另接 5V 供电并与开发板共地。
+                    时段按北京时间（UTC+8）判定；声控响度取自麦克风采集，无需额外接线。
+                </div>
+            </fieldset>
+
+            <fieldset class="cfg-section wide">
                 <legend>MQTT IPv6 上报（公网 IPv6 变化时推送）</legend>
                 <div class="cfg-row">
-                    <label><input type="checkbox" id="cfg_mqtt_enabled"> 启用 IPv6 地址 MQTT 上报</label>
+                    <label class="toggle-label"><input type="checkbox" id="cfg_mqtt_enabled"> 启用 IPv6 地址 MQTT 上报</label>
                 </div>
                 <div class="cfg-row">
                     <label>Broker 地址
@@ -459,7 +495,7 @@
                     <span class="hint-inline">地址没变也每隔此秒数重报一次（心跳）；默认 3600=1小时；0=关闭仅变化时报</span>
                 </div>
                 <div class="cfg-row">
-                    <label><input type="checkbox" id="cfg_mqtt_retain"> 保留消息(retain)</label>
+                    <label class="toggle-label"><input type="checkbox" id="cfg_mqtt_retain"> 保留消息(retain)</label>
                     <span class="hint-inline">开启后新订阅者一连上即收到最后上报的地址；推荐开启</span>
                 </div>
                 <div class="hint">
@@ -467,2171 +503,33 @@
                     publish 完立即断开；地址不变时零网络开销。关闭时线程只空转。
                 </div>
             </fieldset>
+            </div>
 
-            <div class="hint">
+            <div class="hint-box">
                 所有设置即时落盘到 <code>config.json</code>；其中 AI / 相册 / OSD 立即生效，
                 录像分片时长在下次切片时生效（10 分钟内）。
             </div>
-        </div>
+        </section>
 
+    </main>
+</div>
+<div id="lightbox" aria-hidden="true">
+    <button id="lbClose" class="btn-quiet lightbox-close" aria-label="关闭大图">关闭</button>
+    <img id="lbImg" src="" alt="">
+    <a id="lbDownload" class="button btn-primary" href="#" download>下载原图</a>
+</div>
+<div id="toastStack" class="toast-stack" aria-live="polite" aria-atomic="true"></div>
+<div id="confirmBackdrop" class="confirm-backdrop" aria-hidden="true">
+    <div class="confirm-box" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+        <h2 id="confirmTitle">请确认操作</h2>
+        <p id="confirmMessage"></p>
+        <div class="confirm-actions">
+            <button id="confirmCancel" class="btn-quiet">取消</button>
+            <button id="confirmOk" class="btn-danger">确认</button>
+        </div>
     </div>
 </div>
-<div id="lightbox"><img id="lbImg" src="" alt=""><a id="lbDownload" href="#" download>⬇️ 下载</a></div>
 
-<script>
-(() => {
-    // ============================================================
-    // Tab 切换
-    // ============================================================
-    const tabs  = document.getElementById('tabs');
-    const panes = {
-        live:     document.getElementById('pane-live'),
-        playback: document.getElementById('pane-playback'),
-        album:    document.getElementById('pane-album'),
-        settings: document.getElementById('pane-settings'),
-    };
-    let curTab = 'live';
-    tabs.addEventListener('click', (ev) => {
-        const t = ev.target.closest('.tab');
-        if (!t) return;
-        const name = t.getAttribute('data-tab');
-        if (name === curTab) return;
-        for (const el of tabs.querySelectorAll('.tab')) el.classList.toggle('active', el === t);
-        for (const k of Object.keys(panes)) panes[k].classList.toggle('active', k === name);
-        curTab = name;
-        if (name === 'playback' && !pbInited) initPlayback();
-        if (name === 'album'    && !albumInited) initAlbum();
-        if (name === 'album') refreshAlbum();
-        if (name === 'settings' && !cfgInited) initSettings();
-    });
-
-    // ============================================================
-    // 公共：API 封装
-    // ============================================================
-    async function api(method, path, body) {
-        const opt = { method, cache: 'no-store' };
-        if (body !== undefined) {
-            opt.headers = { 'Content-Type': 'application/json' };
-            opt.body = typeof body === 'string' ? body : JSON.stringify(body);
-        }
-        const r = await fetch(path, opt);
-        const t = await r.text();
-        try { return { ok: r.ok, status: r.status, data: JSON.parse(t) }; }
-        catch { return { ok: r.ok, status: r.status, data: t }; }
-    }
-    function fmtSize(n) {
-        if (n < 1024)            return n + ' B';
-        if (n < 1024*1024)       return (n/1024).toFixed(1) + ' KB';
-        if (n < 1024*1024*1024)  return (n/1024/1024).toFixed(2) + ' MB';
-        return (n/1024/1024/1024).toFixed(2) + ' GB';
-    }
-    function dayPretty(yyyymmdd) {
-        if (!yyyymmdd || yyyymmdd.length !== 8) return yyyymmdd || '';
-        return yyyymmdd.slice(0,4) + '-' + yyyymmdd.slice(4,6) + '-' + yyyymmdd.slice(6,8);
-    }
-
-    // 通用下载：fetch → Blob → 临时 a[download] click。
-    //
-    // 为什么不直接用 a[href=url][download]？
-    //   走 https + 自签名证书时，Chrome 对 <a download> 触发的下载会**重新校验**
-    //   服务器证书，且不复用页面 Tab 已经"忽略警告"的豁免，于是直接以
-    //   net::ERR_CERT_AUTHORITY_INVALID 失败，下载列表里只看到"网络错误"。
-    //   而 fetch() 走的是页面已建立的同源 TLS 通道，会沿用 Tab 的证书豁免，
-    //   因此能稳定拿到字节流；拿到后转 Blob，用 ObjectURL 做"另存为"即可。
-    //   走明文 http 时这套也照样工作，浏览器无差别处理。
-    async function downloadViaFetch(url, filename, onStatus) {
-        try {
-            if (onStatus) onStatus('下载中…');
-            const r = await fetch(url, { cache: 'no-store' });
-            if (!r.ok) throw new Error('HTTP ' + r.status);
-            const blob = await r.blob();
-            const objUrl = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = objUrl;
-            a.download = filename || 'download';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            // 给浏览器一点时间发起保存，再回收 ObjectURL
-            setTimeout(() => URL.revokeObjectURL(objUrl), 4000);
-            if (onStatus) onStatus('已开始下载: ' + (filename || url));
-            return true;
-        } catch (e) {
-            console.error('downloadViaFetch fail:', url, e);
-            if (onStatus) onStatus('下载失败: ' + (e && e.message ? e.message : e));
-            return false;
-        }
-    }
-
-    // ============================================================
-    // 实况 Tab：MSE 直播（与原版一致，仅去掉手动开始/停止录像按钮）
-    // ============================================================
-    const v       = document.getElementById('v');
-    const stat    = document.getElementById('stat');
-    const logBox  = document.getElementById('log');
-    const btnS    = document.getElementById('btnStart');
-    const btnE    = document.getElementById('btnStop');
-    const btnUn   = document.getElementById('btnUnmute');
-    const recDot  = document.getElementById('recDot');
-    const recStat = document.getElementById('recStat');
-
-    // 本地实时时钟：渲染到画面右上角，用于和开发板烧录在画面左下角的
-    // "采集时刻"肉眼比对，差值≈端到端直播延迟。
-    // 格式与开发板烧录完全一致（YYYY-MM-DD HH:MM:SS），方便逐位对齐读差。
-    // 秒级即可（毫秒位对人眼比对无意义且抖动分心）。用 setInterval 250ms
-    // 刷新保证秒进位及时；切到后台 tab 时浏览器自动降频，省电。
-    const liveClock = document.getElementById('liveClock');
-    (function tickClock() {
-        const d  = new Date();
-        const p2 = n => String(n).padStart(2, '0');
-        liveClock.textContent =
-            `${d.getFullYear()}-${p2(d.getMonth()+1)}-${p2(d.getDate())} ` +
-            `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
-        setTimeout(tickClock, 250);
-    })();
-
-    // 直播 WebSocket 端口与协议对应关系（后端分别监听）：
-    //   http://<host>:8080/  →  ws://<host>:8081/   （明文 ws）
-    //   https://<host>:8443/ →  wss://<host>:8444/  （TLS wss）
-    // 早期硬编码成 8081，导致从 https 进入时拼出 wss://host:8081 去敲
-    // 一个明文 ws 端口，OpenSSL 没回应、浏览器直接报错，"实况" tab 永远连不上。
-    const wsUrl = (() => {
-        const isHttps = location.protocol === 'https:';
-        const proto   = isHttps ? 'wss' : 'ws';
-        const port    = isHttps ? 8444  : 8081;
-        // location.hostname 对 IPv6 字面量会去掉方括号（如 2409:8a1e:...），
-        // 直接拼 ws://2409:..:8081 会被解析成非法 URL。含 ':' 即为 IPv6，补回方括号。
-        let host = location.hostname || '127.0.0.1';
-        if (host.indexOf(':') !== -1 && host[0] !== '[') host = `[${host}]`;
-        return `${proto}://${host}:${port}/`;
-    })();
-
-    let ws = null, ms = null, sb = null;
-    let queue = [], appending = false, gotInit = false;
-    let liveWanted = false;   // 用户是否"想看直播"：区分主动停 vs 切后台临时停
-
-    // 起播预缓冲：每秒一个 IDR、fragment ~1s，若拿到第 1 片就 seek 到末端并 play，
-    // 缓冲只有 ~1s，播放头立刻贴边、readyState 不足 → 卡在首帧。改为先攒够
-    // LIVE_START_BUFFER 秒再起播，起步即有水位，首帧顺滑。liveStarted 标记是否已起播。
-    const LIVE_START_BUFFER = 1.6;
-    let liveStarted = false;
-    // 方案C：大 PTS 归零。板子 PTS 用单调时钟从进程启动累加，跑久了 fragment 的
-    // baseMediaDecodeTime(tfdt) 会涨到几十万秒。新客户端中途接入时，MSE 时间轴从 0
-    // 起却收到 tfdt=19万秒的 fragment → 解码基准错位 → 卡首帧/定格。
-    // 解法：解析首个 media fragment 的 tfdt，在 append 前设 sb.timestampOffset
-    // = -(tfdt/90000)，把前端时间轴拉回 ~0，与板子运行多久无关。
-    const VIDEO_TIMESCALE = 90000;   // 与 fmp4Muxer kTbVideo90k 一致
-    let tsOffsetSet = false;
-
-    // 扫 MP4 box 找 moof/traf/tfdt，返回 baseMediaDecodeTime(90kHz)；找不到返回 null。
-    // box 结构：[4B size][4B type][payload]。tfdt 在 moof>traf 内，full box：
-    // [4B size][4B 'tfdt'][1B version][3B flags][4B 或 8B baseMediaDecodeTime]。
-    function parseFirstTfdt(arrayBuf) {
-        const dv = new DataView(arrayBuf);
-        const len = dv.byteLength;
-        // 在 [off, end) 范围内遍历同级 box，需要进入容器(moof/traf)就递归
-        function scan(off, end) {
-            while (off + 8 <= end) {
-                const size = dv.getUint32(off);
-                const type = String.fromCharCode(
-                    dv.getUint8(off+4), dv.getUint8(off+5),
-                    dv.getUint8(off+6), dv.getUint8(off+7));
-                if (size < 8) return null;           // 防御非法 box
-                const payloadStart = off + 8;
-                const boxEnd = off + size;
-                if (boxEnd > end) return null;
-                if (type === 'moof' || type === 'traf') {
-                    const r = scan(payloadStart, boxEnd); // 容器：进入
-                    if (r !== null) return r;
-                } else if (type === 'tfdt') {
-                    const version = dv.getUint8(payloadStart);
-                    const vOff = payloadStart + 4;       // 跳过 version(1)+flags(3)
-                    if (version === 1) {
-                        // 64-bit：高32位通常为0，用 getUint32 拼，避免 BigInt 兼容问题
-                        const hi = dv.getUint32(vOff);
-                        const lo = dv.getUint32(vOff + 4);
-                        return hi * 4294967296 + lo;
-                    } else {
-                        return dv.getUint32(vOff);
-                    }
-                }
-                off = boxEnd;
-            }
-            return null;
-        }
-        try { return scan(0, len); } catch(e) { return null; }
-    }
-
-    // 日志：限制最多保留 200 行，超出从顶部丢弃。
-    // 原实现是 logBox.innerHTML += ... 无上限累加，长时间挂机看直播时
-    // DOM 节点无限增长 → 页面自身内存膨胀、滚动变卡。改为 appendChild +
-    // 超限删首节点，O(1) 控制规模。
-    const LOG_MAX_LINES = 200;
-    function log(msg) {
-        const t = new Date().toLocaleTimeString();
-        const line = document.createElement('div');
-        line.textContent = `[${t}] ${msg}`;
-        logBox.appendChild(line);
-        while (logBox.childElementCount > LOG_MAX_LINES) {
-            logBox.removeChild(logBox.firstChild);
-        }
-        logBox.scrollTop = logBox.scrollHeight;
-    }
-    function setStat(s) { stat.textContent = s; }
-
-    const MIME = 'video/mp4; codecs="avc1.4d001f, mp4a.40.2"';
-
-    function pump() {
-        if (appending || !sb || sb.updating) return;
-        if (queue.length === 0) return;
-        const chunk = queue.shift();
-        // 方案C：在 append 第一个 media fragment 之前，按其 tfdt 设 timestampOffset，
-        // 把大 PTS 拉回 ~0。init segment 无 tfdt（parseFirstTfdt 返回 null）跳过。
-        // timestampOffset 只影响之后 append 的数据，故必须在首片 append 前设好。
-        if (!tsOffsetSet) {
-            const tfdt = parseFirstTfdt(chunk);
-            if (tfdt !== null && tfdt > 0) {
-                const off = -(tfdt / VIDEO_TIMESCALE);
-                try {
-                    sb.timestampOffset = off;
-                    tsOffsetSet = true;
-                    log(`tsOffset set: tfdt=${tfdt} -> offset=${off.toFixed(3)}s`);
-                } catch(e) { log('set timestampOffset failed: ' + e.message); }
-            }
-        }
-        try { appending = true; sb.appendBuffer(chunk); }
-        catch (e) { appending = false; log('appendBuffer error: ' + e.message); }
-    }
-    function attachSb() {
-        if (!MediaSource.isTypeSupported(MIME)) { log('浏览器不支持 ' + MIME); return; }
-        sb = ms.addSourceBuffer(MIME);
-        sb.mode = 'segments';
-        sb.addEventListener('updateend', () => {
-            appending = false;
-            if (sb.buffered.length > 0) {
-                const start = sb.buffered.start(0);
-                const end   = sb.buffered.end(sb.buffered.length - 1);
-                // 0) 起播预缓冲门槛：还没起播时，先攒够 LIVE_START_BUFFER 秒再 seek 到
-                //    末端附近并 play。避免只缓冲 1 片(≈1s)就贴边播导致卡首帧。
-                if (!liveStarted) {
-                    if (end - start >= LIVE_START_BUFFER) {
-                        const target = Math.max(start, end - 0.4);
-                        liveStarted = true;
-                        log(`live start: buffered=${(end-start).toFixed(2)}s, seek -> ${target.toFixed(3)}`);
-                        try { v.currentTime = target; } catch(e){}
-                        try { v.playbackRate = 1.0; } catch(e){}
-                        v.play().catch(()=>{});
-                    }
-                    // 预缓冲未满：继续攒，先做窗口修剪后返回，不进入追尾逻辑
-                    if (!liveStarted) {
-                        if (end - start > 8) { try { sb.remove(start, end - 4); } catch(e){} }
-                        pump();
-                        return;
-                    }
-                }
-                // 1) 修剪兜底：currentTime 已落到被 sb.remove 切掉的旧区段 → 跳到 buffered 头
-                if (v.currentTime < start - 0.5) {
-                    log('seek live: ' + v.currentTime.toFixed(3) + ' -> ' + start.toFixed(3));
-                    try { v.currentTime = start; } catch(e){}
-                    v.play().catch(()=>{});
-                }
-                // 2) 低延时追尾：直播播放头落后 buffered 末端时，优先用"微调倍速"平滑追，
-                //    避免 seek 触发解码重置的几十毫秒卡顿。只有落后过大（切后台 tab 回来等）
-                //    倍速追太慢时才退化为硬 seek 拉平。
-                //    触发场景（既覆盖启动也覆盖稳态）：
-                //      - 起播：浏览器 MSE 收到 init+几个 fragment 后默认会攒 2-5s 才开播，
-                //        currentTime 起步就远低于 buffered.end。
-                //      - 切到非直播 tab：Chrome 在 background tab 里限速 video 解码，
-                //        WebSocket → SourceBuffer 仍持续 append → buffered.end 飞涨，
-                //        currentTime 龟速前进 → 切回 tab 时累积几十秒甚至几分钟延迟。
-                //      - 网络抖动一次性涌入大量 fragment 同样会拉大差距。
-                //    水位设计（fragment ~200-500ms + IDR 周期 1s）：
-                //      lag > LIVE_LAG_HARD(4s)  → 倍速追要几十秒，直接 seek 到 end-0.15
-                //      lag > LIVE_LAG_HIGH(0.6s)→ playbackRate=1.1 平滑追
-                //      lag <= LIVE_LAG_LOW(0.15)→ 恢复 playbackRate=1.0
-                //      0.15~0.6 之间为迟滞区，保持当前速度不抖动
-                else {
-                    const lag = end - v.currentTime;
-                    // 分级追尾：尽量用倍速平滑追，硬 seek 只作为"积压过大"的最后手段
-                    // （硬 seek 会重置解码器，造成可见卡顿/花屏，是体感卡顿的主因之一）。
-                    //   lag > 8s        → 积压过大（长时间后台回来），硬 seek 拉平
-                    //   lag > 2s        → 1.3x 快追
-                    //   lag > 0.6s      → 1.1x 平滑追
-                    //   lag <= 0.15s    → 恢复 1.0x
-                    //   中间区为迟滞带，保持当前速度不抖动
-                    if (lag > 8) {
-                        const target = end - 0.3;
-                        log(`live tail seek(big lag): ${v.currentTime.toFixed(3)} -> ${target.toFixed(3)} (lag=${lag.toFixed(2)}s)`);
-                        try { v.currentTime = target; } catch(e){}
-                        if (v.playbackRate !== 1.0) v.playbackRate = 1.0;
-                        v.play().catch(()=>{});
-                    } else if (lag > 2) {
-                        if (v.playbackRate !== 1.3) {
-                            v.playbackRate = 1.3;
-                            log(`live tail speed-up 1.3x (lag=${lag.toFixed(2)}s)`);
-                        }
-                    } else if (lag > 0.6) {
-                        if (v.playbackRate !== 1.1) {
-                            v.playbackRate = 1.1;
-                            log(`live tail speed-up 1.1x (lag=${lag.toFixed(2)}s)`);
-                        }
-                    } else if (lag <= 0.15) {
-                        if (v.playbackRate !== 1.0) {
-                            v.playbackRate = 1.0;
-                            log(`live tail back to 1.0x (lag=${lag.toFixed(2)}s)`);
-                        }
-                    }
-                }
-                // 3) 缓冲窗口压缩：直播不需要长历史，但留太薄(4s)抗抖动差、易触发追尾硬 seek。
-                //    end-start > 12s 才修剪到留 6s，给网络抖动留足缓冲余量。
-                if (end - start > 12) {
-                    try { sb.remove(start, end - 6); } catch(e){}
-                }
-            }
-            pump();
-        });
-        sb.addEventListener('error', () => log('sb error'));
-        pump();
-    }
-    function startLive() {
-        if (ws) { log('已经在连接中'); return; }
-        gotInit = false; queue = [];
-        liveStarted = false;   // 复位起播门槛：本轮重新走预缓冲再起播
-        tsOffsetSet = false;   // 复位时间戳偏移：本轮重新按首片 tfdt 拉回 0
-        try { v.playbackRate = 1.0; } catch(e){}   // 复位上一轮残留的追尾倍速
-        ms = new MediaSource();
-        v.src = URL.createObjectURL(ms);
-        ms.addEventListener('sourceopen', () => {
-            URL.revokeObjectURL(v.src);
-            log('MediaSource sourceopen');
-            attachSb();
-        });
-        log('连接 ' + wsUrl);
-        setStat('连接中…');
-        ws = new WebSocket(wsUrl);
-        ws.binaryType = 'arraybuffer';
-        ws.onopen = () => { log('WebSocket 已连接'); setStat('已连接，等待 init segment'); };
-        ws.onmessage = (ev) => {
-            if (typeof ev.data === 'string') { log('text msg: ' + ev.data); return; }
-            const buf = ev.data;
-            if (!gotInit) {
-                gotInit = true;
-                setStat('收到 init segment, 等首个 fragment');
-                log('init segment: ' + buf.byteLength + ' bytes');
-            }
-            queue.push(buf);
-            pump();
-            // 起播由 attachSb 的 updateend 水位逻辑驱动（攒够 LIVE_START_BUFFER 秒
-            // 再 seek 到末端并 play），不在这里"收到一片就 play"——否则只缓冲 1 片
-            // (≈1s) 就贴着 buffered 末端播，readyState 立刻不足，表现为卡首帧。
-        };
-        ws.onclose = () => { log('WebSocket 关闭'); setStat('已断开'); ws = null; };
-        ws.onerror = () => log('WebSocket 错误');
-    }
-    function stopLive() {
-        if (ws) { ws.close(); ws = null; }
-        try { v.pause(); } catch(e){}
-        v.removeAttribute('src'); v.load();
-        ms = null; sb = null; queue = []; gotInit = false; liveStarted = false; tsOffsetSet = false;
-        setStat('已停止');
-    }
-    btnS.onclick  = () => { liveWanted = true;  startLive(); };
-    btnE.onclick  = () => { liveWanted = false; stopLive();  };
-
-    // 页面隐藏时省流：切到后台 tab / 锁屏时，浏览器仍会通过 WebSocket 持续接收
-    // fragment（白白消耗手机流量和电），且 background tab 解码被限速会让 buffered
-    // 越堆越多、切回来延迟暴涨。这里在 hidden 时主动断流，visible 时若用户本来
-    // 在看就自动重连续播。liveWanted 区分"用户主动停"与"切后台临时停"。
-    document.addEventListener('visibilitychange', () => {
-        if (document.hidden) {
-            if (liveWanted && ws) { log('页面隐藏，暂停拉流省流'); stopLive(); }
-        } else {
-            if (liveWanted && !ws) { log('页面恢复，重新连接'); startLive(); }
-        }
-    });
-    // 静音按钮做成二态切换：跟随 video.muted 自动更新文案/图标
-    function syncMuteBtn() {
-        if (v.muted) { btnUn.textContent = '🔇 取消静音'; btnUn.title = '当前已静音，点击开启声音'; }
-        else         { btnUn.textContent = '🔊 静音';     btnUn.title = '当前有声，点击静音'; }
-    }
-    btnUn.onclick = () => {
-        v.muted = !v.muted;
-        if (!v.muted) v.play().catch(()=>{});
-        syncMuteBtn();
-    };
-    // 用户通过 video 原生控件改静音时也要同步按钮
-    v.addEventListener('volumechange', syncMuteBtn);
-    syncMuteBtn();
-    v.addEventListener('waiting', () => setStat('缓冲中…'));
-    v.addEventListener('playing', () => setStat('播放中'));
-
-    // 切回直播 tab / 浏览器 tab 重新可见时，主动追尾。
-    // 仅靠 SourceBuffer 'updateend' 是不够的：
-    //   - 如果此时没有新 fragment 抵达（比如刚切回还没 updateend），就没人触发追平
-    //   - background tab 期间累积的几十秒延时此时正等着被一把抹平
-    function liveCatchUpToTail(why) {
-        if (!sb || sb.updating || !v) return;
-        if (!sb.buffered || sb.buffered.length === 0) return;
-        const end = sb.buffered.end(sb.buffered.length - 1);
-        // 仅当积压较大（>3s，典型为长时间后台回来）才硬 seek 抹平；小幅落后交给
-        // updateend 的倍速追尾平滑处理，避免每次切回前台都硬 seek 造成可见卡顿。
-        if (end - (v.currentTime || 0) > 3.0) {
-            const target = end - 0.3;
-            log(`live tail catch-up (${why}): ${(v.currentTime||0).toFixed(3)} -> ${target.toFixed(3)}`);
-            try { v.currentTime = target; } catch(e){}
-            v.play().catch(()=>{});
-        }
-    }
-    document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') liveCatchUpToTail('visible');
-    });
-    // tab 切换回 live 也追一次（curTab 在 tab 点击 handler 里更新）
-    tabs.addEventListener('click', () => {
-        if (curTab === 'live') setTimeout(() => liveCatchUpToTail('tab'), 50);
-    });
-
-    // 拍照按钮：调 POST /api/snapshot；成功后给一行小提示并标记相册需要刷新
-    const btnSnap  = document.getElementById('btnSnap');
-    const snapTip  = document.getElementById('snapTip');
-    btnSnap.onclick = async () => {
-        btnSnap.disabled = true;
-        snapTip.textContent = '正在拍照…';
-        try {
-            const r = await api('POST', '/api/snapshot');
-            if (r.ok && r.data && r.data.ok) {
-                snapTip.innerHTML =
-                    `✅ 已保存：<code>${r.data.name}</code>（${fmtSize(r.data.size||0)}）` +
-                    ` — 切换到「相册」Tab 查看`;
-                albumDirty = true;
-            } else {
-                snapTip.textContent = '❌ 拍照失败：' + (r.data && r.data.err || ('HTTP '+r.status));
-            }
-        } catch (e) {
-            snapTip.textContent = '❌ 拍照异常：' + e.message;
-        }
-        btnSnap.disabled = false;
-    };
-
-    // 放门口提示音：调 POST /api/prompt {name:'door'}
-    // 服务端同步阻塞约 1.4 秒（door.wav 时长）；并发调用返回 409 busy。
-    // 提示音通过 C_TalkPlayer 共享 ALSA：talk 在线时与之串行；不在线时临时打开声卡。
-    const btnDoor = document.getElementById('btnDoor');
-    btnDoor.onclick = async () => {
-        if (btnDoor.disabled) return;
-        const orig = btnDoor.textContent;
-        btnDoor.disabled = true;
-        btnDoor.textContent = '🔔 播放中…';
-        snapTip.textContent = '正在播放提示音「放门口」…';
-        let r;
-        try {
-            r = await api('POST', '/api/prompt', { name: 'door' });
-            if (r.ok && r.data && r.data.ok) {
-                snapTip.textContent = '✅ 已播放提示音「放门口」'
-                    + (r.data.duration_ms ? ` (${r.data.duration_ms}ms)` : '');
-            } else if (r.status === 409) {
-                snapTip.textContent = '⚠️ 提示音正在播放，稍后再试';
-            } else if (r.status === 404) {
-                snapTip.textContent = '❌ 提示音文件未部署：检查 dist/prompt/door.wav';
-            } else {
-                snapTip.textContent = '❌ 提示音失败：'
-                    + ((r.data && r.data.err) || ('HTTP ' + r.status));
-            }
-        } catch (e) {
-            snapTip.textContent = '❌ 提示音异常：' + e.message;
-        }
-        btnDoor.textContent = orig;
-        btnDoor.disabled = false;
-    };
-
-    // 录像状态轮询（只读，没有 start/stop 按钮）
-    async function refreshRecStatus() {
-        const r = await api('GET', '/api/record/status?ts=' + Date.now());
-        if (!r.ok) { recStat.textContent = '状态获取失败'; return; }
-        const s = r.data || {};
-        if (s.recording) {
-            recDot.classList.add('on');
-            recStat.textContent = `监控录像中 · ${s.file || ''} · ${fmtSize(s.bytes||0)}`;
-        } else {
-            recDot.classList.remove('on');
-            recStat.textContent = '监控录像未启动';
-        }
-    }
-    setInterval(refreshRecStatus, 2000);
-    refreshRecStatus();
-
-    // 自动起播
-    startLive();
-
-    // ============================================================
-    // 讲话（浏览器→开发板 单向语音）
-    //
-    // 浏览器端用 WebCodecs.AudioEncoder（Opus, 48kHz mono）做实时编码，
-    // 通过独立的 WebSocket /ws/talk 把 OPUS 帧 binary 发给后端，
-    // 后端 talkPlayer 解码 + ALSA 直接播放。
-    //
-    // ⚠️ 安全上下文限制：
-    //   - 浏览器只在 secure context 下才会暴露 navigator.mediaDevices.getUserMedia
-    //     与 window.AudioEncoder（WebCodecs）。
-    //   - secure context 包括 https://、localhost、127.0.0.1。
-    //   - 普通 http://<LAN-IP>:8080 不属于 secure context，整套 API 都是 undefined。
-    //   - 因此本按钮只在 location.protocol === 'https:' 或 hostname 是
-    //     localhost/127.0.0.1 时显示；其它情况自动隐藏，不影响其它功能。
-    //   - 用户首次点击会弹"麦克风"权限请求，浏览器自带 UI（无需我们处理）。
-    // ============================================================
-    const btnTalk  = document.getElementById('btnTalk');
-
-    function isSecureContextOk() {
-        // 受信安全上下文：标准实现优先，兜底用域名判断
-        if (typeof window.isSecureContext !== 'undefined') {
-            return !!window.isSecureContext;
-        }
-        if (location.protocol === 'https:') return true;
-        const h = location.hostname;
-        return (h === 'localhost' || h === '127.0.0.1' || h === '::1');
-    }
-    function isWebCodecsAudioOk() {
-        return typeof window.AudioEncoder === 'function'
-            && navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function';
-    }
-
-    // 仅当安全上下文 + 浏览器支持 WebCodecs Audio 时才显示按钮；
-    // 其余情况隐藏（http 访问、Safari 老版本、Firefox < 130 等）。
-    if (isSecureContextOk() && isWebCodecsAudioOk()) {
-        btnTalk.style.display = '';
-    } else {
-        btnTalk.style.display = 'none';
-        log('讲话按钮已隐藏：' + (isSecureContextOk()
-            ? '当前浏览器不支持 WebCodecs AudioEncoder'
-            : '当前为 http 非安全上下文，请改用 https://<ip>:8443 访问'));
-    }
-
-    let talkWs = null, talkEnc = null, talkStream = null, talkNode = null, talkCtx = null;
-    let talkOn = false;
-
-    function setTalkUi(on, msg) {
-        talkOn = on;
-        btnTalk.classList.toggle('on', on);
-        btnTalk.textContent = on ? '🔴 正在讲话' : '🎤 讲话';
-        if (msg) log(msg);
-    }
-
-    async function startTalk() {
-        if (talkOn) return;
-        try {
-            // 1) 申请麦克风（48k mono，禁用浏览器默认的去噪/AGC，避免与 talkPlayer 端码率竞争）
-            talkStream = await navigator.mediaDevices.getUserMedia({
-                audio: {
-                    sampleRate: 48000,
-                    channelCount: 1,
-                    echoCancellation: true,
-                    noiseSuppression: true,
-                    autoGainControl: true,
-                },
-                video: false,
-            });
-
-            // 2) 起 WebSocket（与直播分离，独立的 /ws/talk endpoint）
-            //    HTTP 模式按钮不显示走不到这；这里强制 wss
-            let talkHost = location.hostname;
-            if (talkHost.indexOf(':') !== -1 && talkHost[0] !== '[') talkHost = `[${talkHost}]`;
-            const wsUrl = `wss://${talkHost}:8444/ws/talk`;
-            talkWs = new WebSocket(wsUrl);
-            talkWs.binaryType = 'arraybuffer';
-            await new Promise((resolve, reject) => {
-                talkWs.onopen  = () => resolve();
-                talkWs.onerror = (e) => reject(new Error('ws error'));
-                setTimeout(() => reject(new Error('ws connect timeout')), 5000);
-            });
-            talkWs.onclose = () => { log('talk ws closed'); stopTalk(); };
-
-            // 3) AudioEncoder（OPUS 48k mono 24kbps）
-            talkEnc = new AudioEncoder({
-                output: (chunk) => {
-                    if (!talkWs || talkWs.readyState !== 1) return;
-                    const buf = new ArrayBuffer(chunk.byteLength);
-                    chunk.copyTo(buf);
-                    talkWs.send(buf);
-                },
-                error: (e) => log('AudioEncoder error: ' + (e && e.message || e)),
-            });
-            talkEnc.configure({
-                codec: 'opus',
-                sampleRate: 48000,
-                numberOfChannels: 1,
-                bitrate: 24000,
-            });
-
-            // 4) AudioContext + AudioWorklet 抽 PCM；为避免引入 worklet 文件，
-            //    直接用 ScriptProcessorNode（已 deprecated 但所有主流浏览器仍支持）。
-            //    每次 onaudioprocess 给出 bufferSize=2048（48k → ~42.7ms）的 Float32，
-            //    构造成 AudioData 喂 encoder。
-            talkCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
-            const src = talkCtx.createMediaStreamSource(talkStream);
-            talkNode = talkCtx.createScriptProcessor(2048, 1, 1);
-            // ScriptProcessor 必须连到 destination 才会触发回调；用 GainNode(0) 静音返回，避免回声
-            const mute = talkCtx.createGain(); mute.gain.value = 0;
-            src.connect(talkNode);
-            talkNode.connect(mute);
-            mute.connect(talkCtx.destination);
-
-            let pcmTsUs = 0; // 微秒
-            const frameDurUs = Math.round(2048 * 1e6 / 48000);
-            talkNode.onaudioprocess = (ev) => {
-                if (!talkEnc || talkEnc.state !== 'configured') return;
-                const ch0 = ev.inputBuffer.getChannelData(0);
-                // AudioEncoder 期望 AudioData (Float32, planar, f32-planar)
-                const ad = new AudioData({
-                    format: 'f32-planar',
-                    sampleRate: 48000,
-                    numberOfFrames: ch0.length,
-                    numberOfChannels: 1,
-                    timestamp: pcmTsUs,
-                    data: ch0,            // f32-planar 单通道直接传
-                });
-                pcmTsUs += frameDurUs;
-                try { talkEnc.encode(ad); } catch (e) { log('encode err:' + e.message); }
-                ad.close();
-            };
-
-            setTalkUi(true, '🎤 讲话已开始');
-        } catch (e) {
-            log('startTalk 失败: ' + (e && e.message || e));
-            stopTalk();
-        }
-    }
-
-    function stopTalk() {
-        try { if (talkNode)   { talkNode.disconnect(); talkNode.onaudioprocess = null; } } catch(e){}
-        try { if (talkCtx)    talkCtx.close(); } catch(e){}
-        try { if (talkEnc && talkEnc.state !== 'closed') talkEnc.close(); } catch(e){}
-        try { if (talkStream) talkStream.getTracks().forEach(t => t.stop()); } catch(e){}
-        try { if (talkWs && talkWs.readyState <= 1) talkWs.close(); } catch(e){}
-        talkNode = null; talkCtx = null; talkEnc = null; talkStream = null; talkWs = null;
-        setTalkUi(false, '🎤 讲话已结束');
-    }
-
-    btnTalk.onclick = () => { if (talkOn) stopTalk(); else startTalk(); };
-
-    // ============================================================
-    // 回放 Tab：日期 + 分片列表（B2 将升级为 24h 时间轴）
-    // ============================================================
-    let pbInited = false;
-    const pbDate    = document.getElementById('pbDate');
-    const pbRefresh = document.getElementById('pbRefresh');
-    const pbCount   = document.getElementById('pbCount');
-    const pbVideo   = document.getElementById('pbVideo');
-    const pbInfo    = document.getElementById('pbInfo');
-    const pbClock   = document.getElementById('pbClock');
-    const segList   = document.getElementById('segList');
-    const pbPrev    = document.getElementById('pbPrev');
-    const pbNext    = document.getElementById('pbNext');
-    const pbSpeed   = document.getElementById('pbSpeed');
-    const tlCanvas  = document.getElementById('timeline');
-    const tlTip     = document.getElementById('tlTip');
-
-    let pbSegments = [];     // [{name,size,hms,sec, dur}]
-    let pbCurIdx   = -1;
-
-    // ---- 回放倍速 ----
-    // 原生 <video> 控件菜单只给到 2x，但 playbackRate API 本身支持到 16x。
-    // 用自定义下拉框直接设 playbackRate，突破原生上限。
-    // 注意：切分片时 pbVideo.src 会被重设，playbackRate 会被浏览器复位成 1.0，
-    // 所以把目标倍速存到 pbDesiredRate，并在每次源加载后重新 apply。
-    // >2x 自动静音：高倍速音频会刺耳失真，且解码音频徒增开销。
-    let pbDesiredRate = 1;
-    // 切片重载时刻：teardown / 重设 src 会让浏览器把 playbackRate 复位成 1.0 并触发
-    // 一次 ratechange。若此时把 1.0 回写进 pbDesiredRate，就会把用户选的倍速冲掉
-    // （表现为"跳转下一段后倍速没了"）。用这个时间戳在重载后的短窗口内屏蔽回写。
-    let pbReloadAt = 0;
-    function applyPbRate() {
-        // 关键：同时设 defaultPlaybackRate。HTML 媒体 load 算法在 src 变更时会把
-        // playbackRate 复位成 defaultPlaybackRate（默认 1），所以仅设 playbackRate
-        // 在切片重载时会被冲回 1x（加载时序不同，applyPbRate 补救有时来不及）。
-        // 把 defaultPlaybackRate 也设成目标倍速，浏览器复位时就直接复位到目标值。
-        try { pbVideo.defaultPlaybackRate = pbDesiredRate; } catch(e){}
-        try { pbVideo.playbackRate = pbDesiredRate; } catch(e){}
-        pbVideo.muted = (pbDesiredRate > 2);
-    }
-    pbSpeed.onchange = () => {
-        pbDesiredRate = parseFloat(pbSpeed.value) || 1;
-        applyPbRate();
-    };
-    // 切片重载后 src 变更会复位 playbackRate，这几个事件兜底重新施加
-    pbVideo.addEventListener('loadedmetadata', applyPbRate);
-    pbVideo.addEventListener('play',           applyPbRate);
-    // 用户用原生控件改了倍速时，同步下拉框显示（保持一致）；但重载窗口内的
-    // 自动复位（→1.0）不算用户意图，直接忽略，避免冲掉 pbDesiredRate。
-    pbVideo.addEventListener('ratechange', () => {
-        if (performance.now() - pbReloadAt < 1500) return;
-        const r = pbVideo.playbackRate;
-        if (Math.abs(r - pbDesiredRate) > 0.01) {
-            pbDesiredRate = r;
-            // 下拉框若有对应档位就选中，否则不强改
-            const opt = Array.from(pbSpeed.options).find(o => parseFloat(o.value) === r);
-            if (opt) pbSpeed.value = opt.value;
-            pbVideo.muted = (r > 2);
-        }
-    });
-
-    // ---- 自定义时间叠加层（Q1）----
-    //
-    // 浏览器原生 <video> 控件显示的是 currentTime / duration（"28:10 / 30:01"），
-    // 用户更想看到的是 "现在播到的这一帧对应当时几点几分"。
-    //
-    // 实现：把"片段起始 epoch（Unix 秒）" 缓存到 pbCurClockBase，每次 timeupdate
-    // 取 currentTime 加上去，再格式化为 "YYYY-MM-DD HH:MM:SS"。
-    // 监听器一次性绑定，不随 teardownPbMse 解绑——切片时只重置 pbCurClockBase。
-    //
-    // 注意：segments API 的 s.sec 是"当天 0 点起秒数（设备本地时区）"，文件名也
-    // 是设备本地时间命名（YYYYMMDD/HHMMSS.mp4）。浏览器与设备同时区时，用
-    // new Date(yyyy, mm-1, dd, 0, 0, 0) 取本地午夜然后加 sec 即可得到墙上时间。
-    let pbCurClockBase = 0;   // Unix 秒；0 代表当前没有有效片段，不显示叠加层
-
-    function pbSegEpoch(yyyymmdd, secOfDay) {
-        if (!yyyymmdd || yyyymmdd.length !== 8) return 0;
-        const y = +yyyymmdd.slice(0, 4);
-        const m = +yyyymmdd.slice(4, 6);
-        const d = +yyyymmdd.slice(6, 8);
-        const t0 = new Date(y, m - 1, d, 0, 0, 0).getTime();
-        if (!isFinite(t0)) return 0;
-        return Math.floor(t0 / 1000) + ((secOfDay | 0));
-    }
-    function pbFormatClock(epochMs) {
-        const dt = new Date(epochMs);
-        const p = (n) => (n < 10 ? '0' : '') + n;
-        return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())} `
-             + `${p(dt.getHours())}:${p(dt.getMinutes())}:${p(dt.getSeconds())}`;
-    }
-    function updatePbClock() {
-        if (!pbCurClockBase) { pbClock.style.display = 'none'; return; }
-        const t = pbVideo.currentTime || 0;
-        const ms = pbCurClockBase * 1000 + Math.floor(t * 1000);
-        pbClock.textContent = pbFormatClock(ms);
-        pbClock.style.display = 'block';
-    }
-    // 永久绑定：teardownPbMse 只解绑 idx 快路径的 pbTimeListener / pbSeekListener，
-    // 这里独立的叠加层监听器跨片段始终生效。
-    pbVideo.addEventListener('timeupdate',     updatePbClock);
-    pbVideo.addEventListener('seeking',        updatePbClock);
-    pbVideo.addEventListener('loadedmetadata', updatePbClock);
-
-    // ---- 回放预拉缓存（W5：消除切片黑屏）----
-    //
-    // 设计：
-    //   - 当前片 currentTime > duration - 5s 时，后台 fetch 下一片完整字节流，
-    //     缓存到 prefetchCache: Map<absoluteUrl, ArrayBuffer>。
-    //   - playSeg() 切片时先看缓存命中：命中 → 直接 appendBuffer（约 100~300ms 完成 MSE
-    //     初始化即出画面，跳过原本的 6~10s 网络下载）；未命中 → 走老路径 fetch。
-    //   - 缓存为 LRU(2)：保留"上一片"（用户回退时再次命中）+ "下一片"（自动播放命中），
-    //     一次预拉 60-100MB；浏览器内存充裕，不需要太激进；用绝对 URL 作 key，
-    //     跨日期切换时自然失效（key 不一样了）。
-    //
-    // 状态机：
-    //   - prefetchInflight: AbortController，仅同时允许一个预拉，切片切到下一片时先
-    //     abort 老的（如果用户在 5s 之内连续点了"下一片 / 跳片"，老预拉被中止节省带宽）
-    const prefetchCache = new Map();      // url -> { buf: ArrayBuffer, size: number }
-    const PREFETCH_LRU_SIZE = 2;
-    let   prefetchInflight = null;        // { url, ctrl: AbortController }
-    let   prefetchTriggered = false;      // 当前片是否已发起过预拉
-
-    async function initPlayback() {
-        pbInited = true;
-        await loadDays();
-        // 首次进入时绘制空时间轴
-        drawTimeline();
-        window.addEventListener('resize', resizeTimeline);
-        resizeTimeline();
-    }
-    async function loadDays() {
-        const r = await api('GET', '/api/record/days?ts=' + Date.now());
-        if (!r.ok) { pbDate.innerHTML = '<option>加载失败</option>'; return; }
-        const arr = Array.isArray(r.data) ? r.data : [];
-        if (arr.length === 0) {
-            pbDate.innerHTML = '<option value="">暂无录像</option>';
-            pbCount.textContent = '';
-            pbSegments = []; pbCurIdx = -1; renderSegList(); drawTimeline();
-            return;
-        }
-        pbDate.innerHTML = arr.map(d =>
-            `<option value="${d}">${dayPretty(d)}</option>`
-        ).join('');
-        await loadSegments(pbDate.value);
-    }
-    async function loadSegments(date) {
-        if (!date) { pbSegments = []; pbCurIdx = -1; pbCurClockBase = 0; updatePbClock(); renderSegList(); drawTimeline(); return; }
-        const r = await api('GET', '/api/record/segments?date=' + encodeURIComponent(date) + '&ts=' + Date.now());
-        if (!r.ok) { pbCount.textContent = '加载失败'; pbSegments = []; renderSegList(); drawTimeline(); return; }
-        const arr = Array.isArray(r.data) ? r.data : [];
-        // 估算每片时长：用下一片 start - 本片 start；最后一片暂按 600s 兜底
-        for (let i = 0; i < arr.length; i++) {
-            const a = arr[i], b = arr[i+1];
-            if (b) a.dur = Math.max(1, b.sec - a.sec);
-            else   a.dur = 600;  // 兜底（生产配置 10min；测试时若 segmentSec=30，仅最后一片显示偏长不影响功能）
-        }
-        pbSegments = arr;
-        pbCount.textContent = `共 ${pbSegments.length} 段`;
-        pbCurIdx = -1;
-        renderSegList();
-        drawTimeline();
-    }
-    function renderSegList() {
-        if (pbSegments.length === 0) {
-            segList.innerHTML = '<div class="muted" style="padding:6px">该日期没有录像</div>';
-            updateNavButtons();
-            return;
-        }
-        const date = pbDate.value;
-        // 每行末尾加一个 a[download]：浏览器看到 download 属性会强制走"另存为"，
-        // 而不是按 video/mp4 内联播放；title 给鼠标悬停提示文件名。
-        // 注意：a 必须与目标资源同源（这里都是当前 origin）才会触发 download，
-        // 跨源时浏览器会忽略 download 属性退化为内联打开。
-        const html = pbSegments.map((s, i) => {
-            const dlUrl  = '/record/' + encodeURIComponent(date) + '/' + encodeURIComponent(s.name);
-            // 用日期 + 时间组合一个友好的本地文件名： 20260523_141502.mp4
-            const dlName = `${date}_${s.name}`;
-            return `
-            <div class="it ${i===pbCurIdx?'on':''}" data-idx="${i}">
-                <span class="hms">${s.hms}</span>
-                <span class="nm">${s.name}</span>
-                <span class="sz">${fmtSize(s.size)}</span>
-                <a class="dl" href="${dlUrl}" download="${dlName}" title="下载 ${s.name}">⬇</a>
-            </div>`;
-        }).join('');
-        segList.innerHTML = html;
-        updateNavButtons();
-    }
-    function updateNavButtons() {
-        pbPrev.disabled = !(pbCurIdx > 0);
-        pbNext.disabled = !(pbCurIdx >= 0 && pbCurIdx < pbSegments.length - 1);
-    }
-    // 当前正在用 MSE 播的片：用于"同片内 seek"的就地跳转
-    //   pbCurUrl —— 当前 video.src 对应的 mp4 url（非 blob，是逻辑标识）
-    //   pbCurSb / pbCurMs —— 当前 SourceBuffer / MediaSource，留给 seek 时判断 buffered
-    let pbCurUrl = null;
-
-    // 判断 buffered 是否已经覆盖到指定时刻（带 0.2s 余量，与 tryDoSeek 一致）
-    function pbBufferedCovers(t) {
-        try {
-            const b = pbVideo.buffered;
-            for (let i = 0; b && i < b.length; i++) {
-                if (t + 0.2 >= b.start(i) && t + 0.2 < b.end(i)) return true;
-            }
-        } catch(e) {}
-        return false;
-    }
-
-    function playSeg(idx, seekOffset) {
-        if (idx < 0 || idx >= pbSegments.length) return;
-        const s = pbSegments[idx];
-        const date = pbDate.value;
-        const url = '/record/' + encodeURIComponent(date) + '/' + encodeURIComponent(s.name);
-        const want = (typeof seekOffset === 'number' && seekOffset > 0) ? seekOffset : 0;
-
-        // 叠加层：每次进 playSeg 都重设当前片的 epoch base，timeupdate 即取
-        // currentTime 拼出墙上时间。同片就地跳转的快路径下面也要走到这一行
-        // 才能 update（不会发 timeupdate）——所以放在分支前。
-        pbCurClockBase = pbSegEpoch(date, s.sec | 0);
-        updatePbClock();
-
-        // ---- 同片就地跳转（避免 video.src 重置导致 player 控件"先缩小再撑大"）----
-        //
-        // playSeg 之前任何情况下都会走 playSegByMse → teardownPbMse → new MediaSource
-        // → pbVideo.src = URL.createObjectURL(ms)，浏览器把 video 当全新源处理：
-        // 视频面板会先塌成默认尺寸（loadstart 阶段），再等首帧撑回来，视觉上就是
-        // 用户看到的"窗口变小再变大、不连贯"。
-        //
-        // 实际上：
-        //   1) idx 没变 → 同一个 mp4，currentTime 已经在播，buffered 里如果已包含
-        //      目标时刻（比如点了"5 秒前/后"或预拉早就把后段填进去了），直接
-        //      pbVideo.currentTime = want 就能瞬间跳到，没有任何视觉抖动。
-        //   2) idx 没变但 buffered 没覆盖 → 仍要触发新一轮 idx + Range 拉取，
-        //      但这种情况后续再处理（同片内追加 append 还需要把 SourceBuffer
-        //      reset 否则 MSE 会觉得时序跳跃；这里走原路径 fallback 不会变差）。
-        if (idx === pbCurIdx && pbCurUrl === url && pbBufferedCovers(want)) {
-            try {
-                if (Math.abs((pbVideo.currentTime || 0) - want) > 0.05) {
-                    pbVideo.currentTime = want;
-                }
-            } catch(e) {}
-            pbVideo.play().catch(()=>{});
-            pbInfo.textContent = `▶ ${dayPretty(date)} ${s.hms} · ${s.name} · ${fmtSize(s.size)}`;
-            updateNavButtons();
-            drawTimeline();
-            return;
-        }
-
-        pbCurIdx = idx;
-        pbCurUrl = url;
-        prefetchTriggered = false;
-        // 切片时取消正在进行的预拉（如果在拉的不是即将播的这片）
-        if (prefetchInflight && prefetchInflight.url) {
-            if (prefetchInflight.url !== url) {
-                try { prefetchInflight.ctrl.abort(); } catch(e){}
-                prefetchInflight = null;
-            }
-        }
-
-        // 关键：fmp4（empty_moov+frag_keyframe）直接 video.src=url 时
-        //   浏览器无法计算 duration（mvhd duration=0），导致进度条不显示、拖动失效。
-        //   走 MSE：fetch 完整字节 → appendBuffer → endOfStream()，
-        //   MSE 内部根据所有 moof 的 sample duration 之和算出 duration，进度条才会正常。
-        playSegByMse(url, s, seekOffset);
-        pbInfo.textContent = `▶ ${dayPretty(date)} ${s.hms} · ${s.name} · ${fmtSize(s.size)}`;
-        for (const el of segList.querySelectorAll('.it')) {
-            el.classList.toggle('on', Number(el.getAttribute('data-idx')) === idx);
-        }
-        const cur = segList.querySelector('.it.on');
-        if (cur) cur.scrollIntoView({ block:'nearest' });
-        updateNavButtons();
-        drawTimeline();
-    }
-
-    // MSE 加载单个 fmp4 片段
-    //
-    // 设计要点：
-    //   1) **流式 append**（首字节即开播）—— 用 fetch().body.getReader() 边读边
-    //      pbSb.appendBuffer，不再 await arrayBuffer() 等整片下完。fmp4
-    //      （ftyp + moov + frag_keyframe）只需前几百 KB 即可解出首帧，10 分钟 60MB
-    //      的片子从"5~10s 等"降到"几百 ms 出图"。
-    //   2) **epoch 防护** —— 来回点切片时旧的 async 流程仍在 await 某个 chunk，
-    //      唤醒后会向**新片**的 pbSb 塞**旧片**的字节，触发
-    //      INVALID_STATE_ERR / QuotaExceeded，video 进 error 直至崩页。
-    //      用 pbEpoch 自增计数：每次 playSegByMse 进入时拿到 myEpoch；任何 await
-    //      返回点立刻校验 myEpoch 是否还等于全局 pbEpoch，不等就直接早退。
-    //   3) **主动 abort** —— teardown 时 abort 旧 fetch，让对端 fd 早关，避免
-    //      服务端 WriteAllBlocking 等 5s 才感知断连，减轻 detached thread 堆积压力。
-    let pbMs = null, pbSb = null, pbAbort = null;
-    let pbEpoch = 0;
-    // ---- "按需 lookahead"补片所需的额外状态（只在走过 idx 快路径时填充）----
-    //   pbCurIdxJson    —— 当前片的 .idx 解析结果（fragment 表）
-    //   pbAppendedFrags —— Set<int>：已成功 append 进 SourceBuffer 的 fragment 索引集合
-    //                     （注意是 Set 而不是连续区间，因为按需 lookahead 后会形成多段非连续区间，
-    //                      例如 [0..7] 和 [200..207]）
-    //   pbCurUrlForSeek —— 与 pbCurIdxJson 配套的录像 url（防止跨片串改）
-    //   pbSeekFetch     —— 当前正在进行的"按需补 fragment"请求（拖动 / 续播触发）
-    //   pbSeekListener / pbTimeListener —— 注册到 video 的回调，teardown 时解绑
-    let pbCurIdxJson    = null;
-    let pbCurUrlForSeek = null;
-    let pbAppendedFrags = null;
-    let pbSeekFetch     = null;
-    let pbSeekListener  = null;
-    let pbTimeListener  = null;
-    // ensureLookahead 是 playSegByMse 内部闭包（捕获了 myEpoch / refillFrom），
-    // 但 waiting 事件 / 250ms 兜底轮询在外层，需要能调它来"卡住时继续补最后的片"。
-    // 故把当前片的 ensureLookahead 暴露到这个模块级引用，teardown 时清空。
-    let pbEnsureLookahead = null;
-    // 真理之源：本片字节是否已全部 append 进 SourceBuffer。
-    // 只有这个为 true 时，"currentTime 到达 buffered 末端"才能解释为"播完"。
-    // 否则 stall 在末端只能解释为"lookahead/seek refill 还在路上"，绝不能切片。
-    // 三条路径（idx / 缓存 / 流式）各自在自己的"完成"时刻把它置 true。
-    let pbAllAppended = false;
-    function teardownPbMse() {
-        try { if (pbAbort) pbAbort.abort(); } catch(e){}
-        pbAbort = null;
-        try { if (pbSeekFetch) pbSeekFetch.ctrl.abort(); } catch(e){}
-        pbSeekFetch = null;
-        if (pbSeekListener) {
-            try { pbVideo.removeEventListener('seeking', pbSeekListener); } catch(e){}
-            pbSeekListener = null;
-        }
-        if (pbTimeListener) {
-            try { pbVideo.removeEventListener('timeupdate', pbTimeListener); } catch(e){}
-            pbTimeListener = null;
-        }
-        pbEnsureLookahead = null;
-        pbCurIdxJson    = null;
-        pbCurUrlForSeek = null;
-        pbAppendedFrags = null;
-        pbAllAppended   = false;
-        try { if (pbMs && pbMs.readyState === 'open') pbMs.endOfStream(); } catch(e){}
-        pbMs = null; pbSb = null;
-    }
-    // 等 SourceBuffer 当前 append 完成；若 epoch 已过期返回 false，调用方应早退
-    function waitForUpdateEnd(sb, myEpoch) {
-        return new Promise((res) => {
-            const onEnd = () => { sb.removeEventListener('error', onErr); res(true); };
-            const onErr = () => { sb.removeEventListener('updateend', onEnd); res(false); };
-            sb.addEventListener('updateend', onEnd, { once:true });
-            sb.addEventListener('error',     onErr, { once:true });
-        }).then(ok => ok && (myEpoch === pbEpoch));
-    }
-    // 把一段字节安全 append 到 sb；成功 true，失败/被取消 false
-    async function safeAppend(sb, chunk, myEpoch) {
-        if (myEpoch !== pbEpoch) return false;
-        try { sb.appendBuffer(chunk); }
-        catch (e) { console.warn('appendBuffer throw', e); return false; }
-        return await waitForUpdateEnd(sb, myEpoch);
-    }
-
-    // 取伴生 .idx 索引文件并解析。
-    //
-    // 服务端格式（recorder.cpp::AppendIdxEntry_locked）：
-    //   {"v":1,"ts":90000,"init":<bytes>,"frags":[[<tfdt90k>,<offset>,<size>], ...]}
-    //
-    // 容错：
-    //   - 404 → 返回 null（旧录像无伴生 idx，回退到全量流式）
-    //   - 半成品 .idx（正在录的最新片：缺尾部 "]}"）→ 自己补全再 parse
-    //   - 任何异常都返回 null 走兜底分支
-    async function fetchSegIndex(url, signal) {
-        try {
-            const r = await fetch(url + '.idx',
-                { signal, cache: 'no-store' });
-            if (!r.ok) return null;
-            let txt = await r.text();
-            txt = txt.trim();
-            if (!txt.startsWith('{')) return null;
-            let idx = null;
-            try {
-                idx = JSON.parse(txt);
-            } catch (e) {
-                // 半成品：尝试补全 "]}"
-                let fixed = txt;
-                // 去掉末尾可能的逗号或不完整片段
-                // 找最后一个 "]"，截断到那里再补 "]}"
-                const lastBracket = fixed.lastIndexOf(']');
-                if (lastBracket > 0) {
-                    fixed = fixed.substring(0, lastBracket + 1) + ']}';
-                    try { idx = JSON.parse(fixed); }
-                    catch (e2) { return null; }
-                } else { return null; }
-            }
-            if (!idx || idx.v !== 1 || !Array.isArray(idx.frags)) return null;
-            return idx;
-        } catch (e) {
-            return null;
-        }
-    }
-
-    // 在 fragment 数组里找：tfdt <= wantSeek*ts 的最大那条（即 wantSeek 落在的 fragment）
-    function pickFragForSeek(idx, wantSeek) {
-        const ts = idx.ts || 90000;
-        const target = wantSeek * ts;
-        let lo = 0, hi = idx.frags.length - 1, ans = 0;
-        while (lo <= hi) {
-            const m = (lo + hi) >> 1;
-            if (idx.frags[m][0] <= target) { ans = m; lo = m + 1; }
-            else hi = m - 1;
-        }
-        return ans;
-    }
-    async function playSegByMse(url, seg, seekOffset) {
-        const myEpoch = ++pbEpoch;     // 占用本次 epoch
-        pbReloadAt = performance.now(); // 标记重载窗口，屏蔽复位引发的 ratechange 回写
-        teardownPbMse();
-        if (!('MediaSource' in window) || !MediaSource.isTypeSupported(MIME)) {
-            // 回退：直接 src（拖动可能失效，但至少能播）
-            pbVideo.src = url;
-            if (typeof seekOffset === 'number' && seekOffset > 0) {
-                pbVideo.addEventListener('loadedmetadata',
-                    () => { try { pbVideo.currentTime = seekOffset; } catch(e){} },
-                    { once: true });
-            }
-            pbVideo.play().catch(()=>{});
-            return;
-        }
-        const ms = new MediaSource();
-        pbMs = ms;
-        pbVideo.src = URL.createObjectURL(ms);
-
-        // ---------- seek 跟踪状态（在整个函数生命周期内由 append 循环驱动）----------
-        // 之前用浏览器 progress 事件来触发 seek 是错的：MSE 模式下 <video> 的 progress
-        //   事件不依赖 SourceBuffer.append，触发时机不可控（有时根本不发）。
-        //   现在改成"我们自己每次 append 完一个 chunk 就主动判断 buffered 是否覆盖到目标"。
-        const wantSeek = (typeof seekOffset === 'number' && seekOffset > 0)
-                         ? seekOffset : 0;
-        let seekDone = (wantSeek === 0); // 没有 seek 需求等价于"已完成"
-        // 调用：每次 append 完 chunk 后调一次。命中目标即 seek 并标记完成。
-        function tryDoSeek() {
-            if (seekDone) return;
-            if (myEpoch !== pbEpoch) { seekDone = true; return; }
-            try {
-                const b = pbVideo.buffered;
-                for (let i = 0; b && i < b.length; i++) {
-                    // 给 0.2s 余量：buffered.end 刚好等于 wantSeek 时浏览器有时拒绝 seek
-                    if (wantSeek + 0.2 >= b.start(i) && wantSeek + 0.2 < b.end(i)) {
-                        pbVideo.currentTime = wantSeek;
-                        pbVideo.play().catch(()=>{});
-                        seekDone = true;
-                        return;
-                    }
-                }
-            } catch (e) { /* 下次 chunk 再试 */ }
-        }
-
-        // ★ 拿到第一帧（loadeddata）就立刻 play()，让画面尽快出来。
-        //   但若有 seek 需求且尚未完成，先不要从 0 播 —— 否则会出现"从片头播一会再跳"的
-        //   尴尬体验。这种情况下 play 由 tryDoSeek() 触发。
-        const onFirstFrame = () => {
-            if (myEpoch !== pbEpoch) return;
-            if (!seekDone) return;     // 等 seek 完成后再 play
-            pbVideo.play().catch(()=>{});
-        };
-        pbVideo.addEventListener('loadeddata', onFirstFrame, { once: true });
-
-        // 等 MediaSource 打开
-        await new Promise((resolve) => ms.addEventListener('sourceopen', resolve, { once:true }));
-        if (myEpoch !== pbEpoch) { try { URL.revokeObjectURL(pbVideo.src); } catch(e){} return; }
-        URL.revokeObjectURL(pbVideo.src);
-
-        let sb;
-        try {
-            sb = ms.addSourceBuffer(MIME);
-            sb.mode = 'segments';
-        } catch (e) {
-            pbVideo.src = url;
-            pbVideo.play().catch(()=>{});
-            return;
-        }
-        pbSb = sb;
-
-        // ---------- 精准跳转 / 即播 统一走 .idx 快速路径（HTTP Range + 伴生 .idx 索引）----------
-        //
-        // 入口策略：
-        //   - 命中预拉缓存（cachedForRange != null）→ 不走 idx，直接内存 append（更快）
-        //   - 其它一切情况（含点文件名 wantSeek=0）→ 优先走 idx；解析失败再回退到全量流式
-        //
-        // 改进的 idx 路径核心思路："不一口气拉到 EOF，按需 lookahead"：
-        //   1) GET .idx
-        //   2) Range bytes=0-init-1 拉 init segment
-        //   3) 立刻按 idx 估算总时长写到 mediaSource.duration → slider 出总时长可拖动
-        //   4) 当前播放位置所在 fragment 起，**只 append N 个 fragment 的 lookahead**
-        //      （N 由 LOOKAHEAD_SEC 控制，约 8s 视频）；append 完即 SourceBuffer 空闲
-        //   5) timeupdate 监听：当 buffered.end - currentTime < LOOKAHEAD_LOW_SEC 时
-        //      继续追加下一批 lookahead；按需即可，永不阻塞 SourceBuffer
-        //   6) seeking 监听：拖动时立即拉一批以目标 fragment 为起点的 lookahead
-        //
-        // 这样修复了两个问题：
-        //   - 直接点文件名（wantSeek=0）也能立刻显示总时长（之前条件是 wantSeek > 0）
-        //   - 拖动响应慢（之前 SourceBuffer 被 30~60s 的"流式到 EOF"占住，
-        //     ensureBufferedAt 的 Range 字节回来后要排队 safeAppend；现在初始 batch
-        //     ~1s 就完成 append，SourceBuffer 立刻空闲，拖动 Range 几乎瞬时落地）
-        const LOOKAHEAD_SEC      = 8;   // 每批预拉 ~8s 视频
-        const LOOKAHEAD_LOW_SEC  = 4;   // buffered 余量 < 4s 时触发下一批
-
-        // 公共工具：从 fragStart 起选若干个连续 fragment（累计时长 ≥ wantSec）拉一段字节
-        // append 进 sb；返回 true 表示成功 append 了至少一个 fragment。
-        // 已 append 过的 fragment 会被跳过（避免重复字节）。
-        async function fetchAndAppendBatch(fragStart, wantSec, myEpoch, signal) {
-            if (myEpoch !== pbEpoch) return false;
-            if (!pbCurIdxJson || !pbSb) return false;
-            const jx = pbCurIdxJson;
-            const ts = jx.ts || 90000;
-            // 跳过已 append 的 fragment
-            while (fragStart < jx.frags.length &&
-                   pbAppendedFrags && pbAppendedFrags.has(fragStart)) {
-                fragStart++;
-            }
-            if (fragStart >= jx.frags.length) return false;
-            // 选连续区间 [fragStart, fragEnd]：累计时长 >= wantSec 或遇到已 append 边界
-            let fragEnd = fragStart;
-            const tStart = jx.frags[fragStart][0];
-            while (fragEnd + 1 < jx.frags.length) {
-                if (pbAppendedFrags && pbAppendedFrags.has(fragEnd + 1)) break;
-                const accSec = (jx.frags[fragEnd + 1][0] - tStart) / ts;
-                if (accSec >= wantSec) break;
-                fragEnd++;
-            }
-            const a = jx.frags[fragStart];      // [tfdt, off, sz]
-            const b = jx.frags[fragEnd];
-            const rangeStart = a[1];
-            const rangeEnd   = b[1] + b[2] - 1;
-            const t0 = performance.now();
-            try {
-                const r = await fetch(pbCurUrlForSeek, {
-                    signal, cache: 'no-store',
-                    headers: { 'Range': `bytes=${rangeStart}-${rangeEnd}` }
-                });
-                if (myEpoch !== pbEpoch) return false;
-                if (!r.ok && r.status !== 206) return false;
-                const ab = await r.arrayBuffer();
-                if (myEpoch !== pbEpoch) return false;
-                const ok = await safeAppend(pbSb, new Uint8Array(ab), myEpoch);
-                if (!ok) return false;
-                for (let k = fragStart; k <= fragEnd; k++) pbAppendedFrags.add(k);
-                console.log(`[idx] batch frag #${fragStart}..${fragEnd}/${jx.frags.length} ` +
-                            `(${fmtSize(ab.byteLength)}) in ${(performance.now()-t0).toFixed(0)}ms`);
-                // 全部 fragment 都已 append 时 signal endOfStream，让 <video> 在
-                // currentTime 抵达 duration 时正常触发 'ended' 事件（自动切下一片）。
-                // 不调 endOfStream 时 MediaSource 始终停在 'open'，浏览器认为还会有
-                // 更多数据，不发 'ended'，自动续播链路就断了。
-                // 此时 buffered.end(last) ≈ 我们估算的 ms.duration，endOfStream 重置
-                // duration 影响可忽略；且因为全片在手，回拖也不再补片，不会再抖动。
-                if (pbAppendedFrags.size === jx.frags.length &&
-                    pbMs && pbMs.readyState === 'open') {
-                    pbAllAppended = true;       // ← 真理之源：整片在手
-                    const eos = () => {
-                        if (myEpoch !== pbEpoch) return;
-                        try {
-                            if (pbMs && pbMs.readyState === 'open') {
-                                pbMs.endOfStream();
-                                console.log('[idx] all frags appended → endOfStream()');
-                            }
-                        } catch (e) { console.warn('[idx] endOfStream failed', e); }
-                    };
-                    if (!pbSb.updating) eos();
-                    else pbSb.addEventListener('updateend', eos, { once: true });
-                }
-                return true;
-            } catch (e) {
-                if (e && e.name !== 'AbortError') {
-                    console.warn('[idx] batch fetch failed', e);
-                }
-                return false;
-            }
-        }
-
-        let usedIdxFastPath = false;
-        const cachedForRange = prefetchCache.get(url);
-        if (!cachedForRange) {
-            const probeAbort = new AbortController();
-            // 复用 pbAbort 以便切片时一并 abort
-            pbAbort = probeAbort;
-            const idx = await fetchSegIndex(url, probeAbort.signal);
-            if (myEpoch !== pbEpoch) return;
-            if (idx && idx.frags.length > 0 && idx.init > 0) {
-                const ts0 = idx.ts || 90000;
-                // wantSeek=0 时 fi=0；wantSeek>0 时 fi=目标 fragment
-                const fi  = wantSeek > 0 ? pickFragForSeek(idx, wantSeek) : 0;
-                console.log(`[idx] hit: frag #${fi}/${idx.frags.length} ` +
-                            `(want=${wantSeek}s, totalDur≈${(idx.frags[idx.frags.length-1][0]/ts0).toFixed(0)}s)`);
-                pbInfo.textContent = wantSeek > 0
-                    ? `⚡ 精准跳转（idx #${fi+1}/${idx.frags.length}）`
-                    : `⚡ 即播（idx #1/${idx.frags.length}）`;
-                // 把 idx 暴露给 seeking / timeupdate 监听器，让它能"按需补片"
-                pbCurIdxJson    = idx;
-                pbCurUrlForSeek = url;
-                pbAppendedFrags = new Set();
-
-                // 1) 先取 init segment（bytes=0-<init-1>）
-                let initOk = false;
-                try {
-                    const r1 = await fetch(url, {
-                        signal: probeAbort.signal,
-                        cache:  'no-store',
-                        headers: { 'Range': `bytes=0-${idx.init - 1}` }
-                    });
-                    if (myEpoch !== pbEpoch) return;
-                    if (r1.ok || r1.status === 206) {
-                        const ab = await r1.arrayBuffer();
-                        if (myEpoch !== pbEpoch) return;
-                        initOk = await safeAppend(sb, new Uint8Array(ab), myEpoch);
-                    }
-                } catch (e) { /* 静默回退 */ }
-
-                // 2) 立刻锁定 mediaSource.duration（按 .idx 估算总时长）
-                // 背景：原生 <video> 控件只有在 duration 是有限正数时才会渲染总时长 +
-                //   启用进度条拖动；走 endOfStream 自动算 duration 要等流读完，
-                //   30min/80MB / 1MB/s 上行 = 30~60s 的真空期，整段 slider 不可拖。
-                // 解：.idx 里已经有所有 fragment 的 tfdt（90kHz），用
-                //   tfdt(last)/ts + 末段时长 估算总时长，立即写到 ms.duration。
-                //   MSE 规范允许任意时机 write（sb 不在 updating 即可），且后续
-                //   appendBuffer 即使超了估算 duration，MSE 也会自动扩展。
-                if (initOk && idx.frags.length > 0) {
-                    const ts   = ts0;
-                    const last = idx.frags.length - 1;
-                    let lastFragSec = (last > 0)
-                        ? (idx.frags[last][0] - idx.frags[last - 1][0]) / ts
-                        : 0;
-                    if (!isFinite(lastFragSec) || lastFragSec <= 0) lastFragSec = 0;
-                    // +1.0s 余量；估小了 MSE 自动扩，估大了 video 自身按 sample 时长走
-                    const estDur = idx.frags[last][0] / ts + Math.max(lastFragSec, 0.5) + 1.0;
-                    try {
-                        if (!pbSb.updating && isFinite(estDur) && estDur > 0) {
-                            pbMs.duration = estDur;
-                            console.log(`[idx] ms.duration set = ${estDur.toFixed(2)}s ` +
-                                        `(${idx.frags.length} frags)`);
-                        }
-                    } catch (e) {
-                        console.warn('[idx] set ms.duration failed', e);
-                    }
-                }
-
-                // 3) 拉初始 lookahead 批次（fi 起，约 LOOKAHEAD_SEC 视频）
-                if (initOk) {
-                    const ok = await fetchAndAppendBatch(fi, LOOKAHEAD_SEC, myEpoch,
-                                                         probeAbort.signal);
-                    if (myEpoch !== pbEpoch) return;
-                    if (ok) {
-                        usedIdxFastPath = true;
-                        tryDoSeek();
-                        pbVideo.play().catch(()=>{});
-                    }
-                }
-            }
-            if (myEpoch !== pbEpoch) return;
-        }
-
-        if (usedIdxFastPath) {
-            // 已经走过 idx 快路径，跳过下面的"命中缓存 / 全量流式"分支
-            // 注意：这里**不调 ms.endOfStream()**。原因：
-            //   1) 我们已经在 init append 完后显式设了 ms.duration（按 .idx 估算总时长），
-            //      浏览器原生 slider 已经能正常显示与拖动；
-            //   2) endOfStream() 会把 duration 重置成 buffered.end(last)，覆盖我们设的值，
-            //      还会让 ms 进入 ended 状态——后续向前补片 appendBuffer 时虽然 MSE 会自动
-            //      切回 open，但来回切换会频繁触发 durationchange，体验抖动；
-            //   3) 留 ms 在 open 状态对功能没影响：video 仍能播到最后一帧，只是没有"流结束"
-            //      事件；ended 由 video 自身在 currentTime 到 duration 时正常触发。
-            tryDoSeek();
-            pbVideo.play().catch(()=>{});
-
-            // ---------- 注册 seeking + timeupdate 监听：让进度条拖动 / 续播都能按需补片 ----------
-            // 背景：
-            //   - 初始 batch 只 append 了 [fi, fi+lookahead] 几个 fragment；其它位置都不在
-            //     SourceBuffer.buffered 内。
-            //   - <video> 控件原生进度条直接改 currentTime，不会经过 playSeg；
-            //     正常播放也只是流逝 currentTime。两者都需要我们主动补字节。
-            // seeking 处理：拖动到 t（无论前后），找到目标 fragment fi'，从 fi' 起拉一批
-            //   LOOKAHEAD_SEC 视频；mode='segments' 下新 fragment 会按 tfdt 自动归位，
-            //   不重建 SourceBuffer / <video>，无视口闪烁。
-            // timeupdate 处理：每次播放进度更新，看 buffered.end-currentTime 是否 < LOOKAHEAD_LOW_SEC，
-            //   小于则提前续传下一批；保证连续播放永不 waiting。
-            // 容错：
-            //   - 多次事件（拖动会狂触发）：用 pbSeekFetch 单飞 + 起点终点 dedup
-            //   - 切片 / teardown：teardownPbMse 会 abort pbSeekFetch 并解绑两个 listener
-            //   - epoch 防护：闭包捕获 myEpoch，被切走时立即早退
-            //   - MS 始终 open：idx 快路径不再调 endOfStream，appendBuffer 可直接生效
-            const refillFrom = async (fragStart, wantSec, after) => {
-                if (myEpoch !== pbEpoch) return;
-                if (!pbCurIdxJson) return;
-                if (fragStart < 0 || fragStart >= pbCurIdxJson.frags.length) return;
-                // dedup：同一 fragStart 已经在拉就不重复发
-                if (pbSeekFetch && pbSeekFetch.fragStart === fragStart) return;
-                if (pbSeekFetch) {
-                    try { pbSeekFetch.ctrl.abort(); } catch(e){}
-                    pbSeekFetch = null;
-                }
-                const ctrl = new AbortController();
-                pbSeekFetch = { ctrl, fragStart };
-                try {
-                    const ok = await fetchAndAppendBatch(fragStart, wantSec, myEpoch, ctrl.signal);
-                    if (myEpoch !== pbEpoch) return;
-                    if (ok && typeof after === 'function') after();
-                } finally {
-                    if (pbSeekFetch && pbSeekFetch.ctrl === ctrl) pbSeekFetch = null;
-                }
-            };
-            const ensureBufferedAt = async (t) => {
-                if (myEpoch !== pbEpoch) return;
-                if (!pbCurIdxJson || !pbSb || !pbMs) return;
-                if (pbBufferedCovers(t)) return;
-                const fi = pickFragForSeek(pbCurIdxJson, t);
-                console.log(`[idx] seek refill: t=${t.toFixed(2)}s frag=${fi}`);
-                await refillFrom(fi, LOOKAHEAD_SEC, () => {
-                    // 字节到位后再触发一次 seek，让 video 真的跳过去
-                    try { pbVideo.currentTime = t; } catch(e){}
-                    pbVideo.play().catch(()=>{});
-                });
-            };
-            // ensureLookahead：决定何时补下一批 fragment。
-            //
-            // 之前两版都有 bug：
-            //   v1: 用 buffered.end - currentTime 做判断 → 末段 cur 越过 bEnd 死锁
-            //   v2: "找第一个全局未 append 的 fragment" → 用户拖到尾部后，
-            //       lookahead 一直去 backfill 最小 index 缺口，**播放头前面真正
-            //       需要的 fragment 永远拉不到**（典型现象：日志里 cur 卡在 1792.1
-            //       不动，但 lookahead 在拉 frag 50..114 这种离 cur 1700s 远的位置）
-            //
-            // 这版正确策略：**前向优先 + 后向 backfill**
-            //   1) 从 currentTime 所在 fragment 起向后找第一个未 append（forwardNext）
-            //      → 这是播放头马上要用的字节，优先级最高
-            //   2) forwardNext 距 currentTime <= LOOKAHEAD_LOW_SEC 才触发拉
-            //      （>LOOKAHEAD_LOW_SEC 说明前向 buffered 充足，先不打扰）
-            //   3) forwardNext 全已 append（前向完整）→ 才考虑 backfill 之前的缺口，
-            //      让 pbAppendedFrags 最终能涨到 N，pbAllAppended 转 true
-            //   4) backfill 不受 LOOKAHEAD_LOW_SEC 约束（因为不是给当前播放用的）
-            const ensureLookahead = () => {
-                if (myEpoch !== pbEpoch) return;
-                if (!pbCurIdxJson || !pbSb) return;
-                if (pbAllAppended) return;        // 全片已在手，无需再拉
-                if (pbSeekFetch) return;          // 已经在拉，等它完成
-
-                const N  = pbCurIdxJson.frags.length;
-                const ts = pbCurIdxJson.ts || 90000;
-                const t  = pbVideo.currentTime || 0;
-
-                // 步骤 1：前向优先 —— cur 所在 fragment 起找第一个未 append
-                const curFrag = pickFragForSeek(pbCurIdxJson, t);
-                let forwardNext = -1;
-                for (let i = curFrag; i < N; i++) {
-                    if (!pbAppendedFrags.has(i)) { forwardNext = i; break; }
-                }
-
-                if (forwardNext >= 0) {
-                    // 有前向缺口：判断 lookahead 触发距离
-                    const fragStart = pbCurIdxJson.frags[forwardNext][0] / ts;
-                    if (fragStart - t > LOOKAHEAD_LOW_SEC) return;
-                    refillFrom(forwardNext, LOOKAHEAD_SEC);
-                    return;
-                }
-
-                // 步骤 2：前向完整 → backfill 后向缺口（不受 LOOKAHEAD_LOW_SEC 约束）
-                for (let i = 0; i < curFrag; i++) {
-                    if (!pbAppendedFrags.has(i)) {
-                        refillFrom(i, LOOKAHEAD_SEC);
-                        return;
-                    }
-                }
-                // 这里理论不会到（前向后向都没缺口 = 全 append，pbAllAppended 应已为 true）
-            };
-            pbSeekListener = () => { ensureBufferedAt(pbVideo.currentTime || 0); };
-            pbTimeListener = () => { ensureLookahead(); };
-            pbVideo.addEventListener('seeking',    pbSeekListener);
-            pbVideo.addEventListener('timeupdate', pbTimeListener);
-            // 暴露给外层：waiting 事件 / 250ms 兜底轮询在播放头 stall（timeupdate 停发）
-            // 时也能继续补最后的 fragment，避免"卡在末尾→N-1 永远拉不到→不切片"死锁。
-            pbEnsureLookahead = ensureLookahead;
-
-            const fixDur2 = () => {
-                if (myEpoch !== pbEpoch) return;
-                if (isFinite(pbVideo.duration) && pbVideo.duration > 0) {
-                    seg.dur = Math.max(1, Math.round(pbVideo.duration));
-                    drawTimeline();
-                }
-            };
-            pbVideo.addEventListener('durationchange', fixDur2, { once:true });
-            pbVideo.addEventListener('loadedmetadata', fixDur2, { once:true });
-            return;
-        }
-
-        // ---------- 命中预拉缓存：内存里直接分块 append ----------
-        const cached = prefetchCache.get(url);
-        if (cached) {
-            const buf = new Uint8Array(cached.buf);
-            // LRU 触摸
-            prefetchCache.delete(url); prefetchCache.set(url, cached);
-            pbInfo.textContent = '⚡ 命中预拉缓存（' + fmtSize(cached.size) + '）';
-            const chunkSize = 4 * 1024 * 1024;
-            let off = 0;
-            while (off < buf.length) {
-                if (myEpoch !== pbEpoch) return;
-                const end = Math.min(off + chunkSize, buf.length);
-                const ok = await safeAppend(sb, buf.subarray(off, end), myEpoch);
-                if (!ok) return;
-                off = end;
-                tryDoSeek();   // ← 每次 append 完就尝试 seek
-            }
-        } else {
-            // ---------- 流式 fetch + ReadableStream.getReader() ----------
-            pbAbort = new AbortController();
-            const myAbort = pbAbort;
-            let resp;
-            try {
-                resp = await fetch(url, { signal: myAbort.signal, cache: 'no-store' });
-            } catch (e) {
-                return; // 通常是 AbortError（被新片切走），静默
-            }
-            if (myEpoch !== pbEpoch) return;
-            if (!resp.ok || !resp.body || !resp.body.getReader) {
-                // 极少数浏览器无 streaming，回退到一次性 arrayBuffer
-                try {
-                    const ab = await resp.arrayBuffer();
-                    if (myEpoch !== pbEpoch) return;
-                    await safeAppend(sb, new Uint8Array(ab), myEpoch);
-                    tryDoSeek();
-                } catch(e) {}
-            } else {
-                const reader = resp.body.getReader();
-                let totalBytes = 0;
-                let firstChunkLogged = false;
-                const t0 = performance.now();
-                while (true) {
-                    let r;
-                    try { r = await reader.read(); }
-                    catch (e) { return; }       // 被 abort
-                    if (myEpoch !== pbEpoch) {
-                        try { reader.cancel(); } catch(e){}
-                        return;
-                    }
-                    if (r.done) break;
-                    const ok = await safeAppend(sb, r.value, myEpoch);
-                    if (!ok) {
-                        try { reader.cancel(); } catch(e){}
-                        return;
-                    }
-                    totalBytes += r.value.byteLength;
-                    tryDoSeek();   // ← 每个 chunk append 完都试一下，命中即 seek+play
-                    if (!firstChunkLogged) {
-                        firstChunkLogged = true;
-                        console.log(`[stream] first chunk ${fmtSize(r.value.byteLength)} in ${(performance.now()-t0).toFixed(0)}ms`);
-                    }
-                }
-                console.log(`[stream] done ${fmtSize(totalBytes)} in ${(performance.now()-t0).toFixed(0)}ms`);
-            }
-        }
-        if (myEpoch !== pbEpoch) return;
-
-        // 走到这里说明 idx 路径未命中，缓存 / 流式 / fallback 都已经把整片字节塞进
-        // SourceBuffer 了（前面任意一条出错会 return / break，不会走到这）。
-        // 标记真理之源，让 tryAdvanceToNext 可以放心切下一片。
-        pbAllAppended = true;
-
-        // 关键：endOfStream 之后 MSE 才把所有 moof 的 sample 累加成 duration，
-        // 进度条/拖动才能生效
-        try { if (ms.readyState === 'open') ms.endOfStream(); } catch(e){}
-
-        // 兜底 seek：极端情况下 buffered 在 append 中没命中（例如 ranges 不连续），
-        //   下完之后再尝试一次。
-        tryDoSeek();
-
-        // 兜底 play（loadeddata 没触发 / 走 fallback arrayBuffer 路径时用得上）
-        pbVideo.play().catch(()=>{});
-
-        // 真实时长出来后用它修正 pbSegments[idx].dur（进度时间轴会更准）
-        const fixDur = () => {
-            if (myEpoch !== pbEpoch) return;
-            if (isFinite(pbVideo.duration) && pbVideo.duration > 0) {
-                seg.dur = Math.max(1, Math.round(pbVideo.duration));
-                drawTimeline();
-            }
-        };
-        pbVideo.addEventListener('durationchange', fixDur, { once:true });
-        pbVideo.addEventListener('loadedmetadata', fixDur, { once:true });
-    }
-    segList.addEventListener('click', (ev) => {
-        // 点击下载按钮：阻止默认 a[href] 跳转，改走 fetch+Blob 下载，
-        // 这样 https 自签名场景能复用页面 Tab 的证书豁免（参见 downloadViaFetch 注释）
-        const dl = ev.target.closest('.dl');
-        if (dl) {
-            ev.preventDefault();
-            ev.stopPropagation();
-            const href = dl.getAttribute('href') || '';
-            const fname = dl.getAttribute('download') || '';
-            downloadViaFetch(href, fname, (msg) => { pbInfo.textContent = msg; });
-            return;
-        }
-        const it = ev.target.closest('.it');
-        if (!it) return;
-        playSeg(Number(it.getAttribute('data-idx')));
-    });
-    pbDate.addEventListener('change', () => loadSegments(pbDate.value));
-    pbRefresh.addEventListener('click', loadDays);
-    pbPrev.addEventListener('click', () => playSeg(pbCurIdx - 1));
-    pbNext.addEventListener('click', () => playSeg(pbCurIdx + 1));
-    // —— 播完一片自动切下一片 ——
-    //
-    // 之前几版反复修不好的根本原因：用 currentTime / buffered 这种"播放器外部"
-    // 信号去推断"播完没"，但播放器分不清以下两种 stall：
-    //   A) 播放头之后的 fragment 都已 append，currentTime 真到末尾  → 该切
-    //   B) lookahead / seek refill 还没到，currentTime 暂时越过了 buffered  → 别切
-    //
-    // 真理之源策略：
-    //   - "整片 append 完" pbAllAppended 太严（需要 backfill 中段所有空洞，
-    //     用户拖来拖去后空洞很多，会被无限拖延）
-    //   - 改用更精确的"末段已 append"信号：pbAppendedFrags 已包含最后一个
-    //     fragment（N-1），并且 currentTime 接近最后一个 fragment 的末端
-    //     这才是"该切"的真实条件，与中段是否有洞无关
-    //
-    // nearEnd 判定（OR 任一）：
-    //   - pbVideo.ended（理想路径）
-    //   - duration 有限且 currentTime >= duration - 0.4
-    //   - currentTime >= buffered.end(last) - 0.4 持续 ≥ 600ms
-    //     ★ 必须同时满足：要么 pbAllAppended=true（无 idx 路径走这条），
-    //                    要么 idx 路径下 pbAppendedFrags 含 N-1 且 cur 已进入末段
-    let advancing = false;
-    let endStallSince = 0;       // currentTime 到达 buffered 末端的时刻（ms）
-    let pbLastCur = -1;          // 上次观测的 currentTime，用于检测"是否还在前进"
-
-    // 判断当前播放头是否处于"末段已就绪"状态：
-    //   - 非 idx 路径（缓存 / 流式）：直接看 pbAllAppended（整片字节都进 sb 了）
-    //   - idx 路径：最后一个 fragment 已 append，且播放头满足以下任一：
-    //       a) cur >= 末 fragment 起点（正常播放：平滑推进自然越过）
-    //       b) cur 已 stall 在 buffered 连续区末端附近（高倍速：大步跳进后停在
-    //          buffered 尽头，位置可能恰好落在末 fragment 起点之前的浮点临界，
-    //          cur 不再前进 → a) 永远差一点点判不过 → 永不切片。用 buffered 末端
-    //          兜底：既然 N-1 在手、播放头又停在连续 buffered 的尽头，就是真播完）
-    //     中段空洞不影响判定，因为播放头早已经过了它们
-    function isPlayheadAtTrueEnd() {
-        if (pbAllAppended) return true;
-        if (!pbCurIdxJson || !pbAppendedFrags) return false;
-        const N = pbCurIdxJson.frags.length;
-        if (N <= 0) return false;
-        if (!pbAppendedFrags.has(N - 1)) return false;
-        const ts = pbCurIdxJson.ts || 90000;
-        const lastStart = pbCurIdxJson.frags[N - 1][0] / ts;
-        const cur = pbVideo.currentTime || 0;
-        if (cur >= lastStart - 0.4) return true;            // a) 正常播放
-        // b) 高倍速兜底：播放头已落在最后一段 buffered range 内（不论距末端多远）。
-        //    高倍速 stall 位置距 bEnd 不固定，故用"在末段 range 内"判断而非固定距离。
-        const b = pbVideo.buffered;
-        if (b && b.length > 0) {
-            const bEnd   = b.end(b.length - 1);
-            const bStart = b.start(b.length - 1);
-            if (bEnd > 0.5 && cur >= bStart - 0.1 && cur <= bEnd + 0.1) return true;
-        }
-        return false;
-    }
-
-    function tryAdvanceToNext(reason) {
-        if (advancing) return;
-        if (pbCurIdx < 0 || pbCurIdx >= pbSegments.length - 1) return;
-        // ★ 核心守卫：播放头未到末段 → 任何末端 stall 都是续传未到，绝不切
-        if (!isPlayheadAtTrueEnd()) { endStallSince = 0; return; }
-
-        const dur = pbVideo.duration;
-        const cur = pbVideo.currentTime || 0;
-
-        let why = null;
-        if (pbVideo.ended) {
-            why = 'video.ended';
-        } else if (isFinite(dur) && dur > 0 && cur >= dur - 0.4) {
-            why = `near duration (${cur.toFixed(2)}/${dur.toFixed(2)})`;
-        } else {
-            const b = pbVideo.buffered;
-            if (b && b.length > 0) {
-                const bEnd   = b.end(b.length - 1);
-                const bStart = b.start(b.length - 1);
-                // 判定"停在最后一段 buffered 内且不再前进"，而非"距末端固定距离"。
-                // 背景：高倍速越高，播放头 stall 的位置距 bEnd 越远（4x≈0.47s，
-                // 16x≈0.88s…），固定容差总会被更高倍速突破（打地鼠）。
-                // 稳健判据：播放头落在最后一段 buffered range 内（bStart..bEnd），
-                // 且 currentTime 在 ≥600ms 内几乎没前进（stall）。配合
-                // isPlayheadAtTrueEnd（N-1 已 append）双保险，就是真播完。
-                const insideLastRange = (cur >= bStart - 0.1 && cur <= bEnd + 0.1);
-                const now = performance.now();
-                if (insideLastRange && bEnd > 0.5) {
-                    const moved = Math.abs(cur - pbLastCur) > 0.05;
-                    pbLastCur = cur;
-                    if (moved) {
-                        // 还在前进，不是 stall；但若已非常接近 bEnd 也允许起算
-                        if (cur < bEnd - 0.8) { endStallSince = 0; }
-                        else if (endStallSince === 0) endStallSince = now;
-                    } else {
-                        if (endStallSince === 0) endStallSince = now;
-                    }
-                    if (endStallSince !== 0 && now - endStallSince >= 600) {
-                        why = `stall in last range (${cur.toFixed(2)} in ` +
-                              `${bStart.toFixed(2)}..${bEnd.toFixed(2)}` +
-                              `, ${(now - endStallSince).toFixed(0)}ms)`;
-                    }
-                } else {
-                    endStallSince = 0;
-                    pbLastCur = cur;
-                }
-            }
-        }
-        if (!why) return;
-
-        advancing = true;
-        endStallSince = 0;
-        console.log(`[auto-next] advance via ${reason}: ${why}`);
-        setTimeout(() => {
-            advancing = false;
-            if (pbCurIdx >= 0 && pbCurIdx < pbSegments.length - 1) {
-                playSeg(pbCurIdx + 1);
-            }
-        }, 0);
-    }
-    pbVideo.addEventListener('ended',      () => tryAdvanceToNext('ended'));
-    pbVideo.addEventListener('waiting',    () => {
-        // 卡住时优先"继续补最后的 fragment"——若末段还没 append，光调 tryAdvanceToNext
-        // 会被 isPlayheadAtTrueEnd 守卫挡掉，导致永远停在末尾。先补片，N-1 到位后再切。
-        if (pbEnsureLookahead) { try { pbEnsureLookahead(); } catch(e){} }
-        tryAdvanceToNext('waiting');
-    });
-    pbVideo.addEventListener('timeupdate', () => {
-        drawTimeline();   // 更新红色播放游标
-        maybeStartPrefetch();
-        tryAdvanceToNext('timeupdate');
-    });
-    // 250ms 兜底轮询：即使所有 video 事件都不发，也能补片 + 切片。
-    // 补片放在切片前：stall 在末尾时 timeupdate 停发，靠这个轮询继续把最后的
-    // fragment 拉完，N-1 到位后 isPlayheadAtTrueEnd 转 true，下一拍即可切。
-    setInterval(() => {
-        if (pbEnsureLookahead) { try { pbEnsureLookahead(); } catch(e){} }
-        tryAdvanceToNext('poll');
-    }, 250);
-
-    // 自动切换诊断辅助：每 2s 在 pbAllAppended=false 时打印当前进度状态。
-    // 用户报"无法自动切下一片"时直接看 console 这条 log 就能判断卡在哪：
-    //   - allAppended=false + appended<N：lookahead 没追到末尾（看 nextFrag/未 append 列表）
-    //   - allAppended=true 但不切：tryAdvanceToNext 守卫问题（看 dur/cur/bEnd）
-    setInterval(() => {
-        if (pbCurIdx < 0) return;
-        const dur = pbVideo.duration;
-        const cur = pbVideo.currentTime || 0;
-        const b = pbVideo.buffered;
-        const bEnd = (b && b.length > 0) ? b.end(b.length - 1) : -1;
-        let info = `[diag] seg#${pbCurIdx}/${pbSegments.length-1} ` +
-                   `cur=${cur.toFixed(1)} bEnd=${bEnd.toFixed(1)} ` +
-                   `dur=${isFinite(dur)?dur.toFixed(1):'∞'} ` +
-                   `allApp=${pbAllAppended} adv=${advancing}`;
-        if (pbCurIdxJson && pbAppendedFrags) {
-            const N = pbCurIdxJson.frags.length;
-            info += ` frags=${pbAppendedFrags.size}/${N}`;
-            if (pbAppendedFrags.size < N) {
-                let miss = [];
-                for (let i = 0; i < N && miss.length < 5; i++) {
-                    if (!pbAppendedFrags.has(i)) miss.push(i);
-                }
-                info += ` miss=[${miss.join(',')}${miss.length>=5?',…':''}]`;
-            }
-        }
-        info += ` paused=${pbVideo.paused} ended=${pbVideo.ended} ` +
-                `msState=${pbMs?pbMs.readyState:'-'}`;
-        console.log(info);
-    }, 2000);
-
-    // 当前片快结束时（dur - 5s）后台预拉下一片完整字节流。
-    //
-    // 触发条件全部满足时启动：
-    //   1) 当前片有 idx 且非最后一片
-    //   2) 当前片本身已被加载过（duration 已知，否则 currentTime 不可信）
-    //   3) currentTime > duration - 5s
-    //   4) 没正在拉别的预拉、且目标 url 不在缓存里
-    //
-    // 失败 / 中止都是静默的：未拉到只是切片时退化成正常下载，不影响功能。
-    function maybeStartPrefetch() {
-        if (prefetchTriggered) return;
-        if (pbCurIdx < 0 || pbCurIdx >= pbSegments.length - 1) return;
-        const dur = pbVideo.duration;
-        if (!isFinite(dur) || dur <= 0) return;
-        if (pbVideo.currentTime < Math.max(0, dur - 5)) return;
-
-        const date = pbDate.value;
-        const next = pbSegments[pbCurIdx + 1];
-        const url  = '/record/' + encodeURIComponent(date) + '/' + encodeURIComponent(next.name);
-        if (prefetchCache.has(url)) { prefetchTriggered = true; return; }
-        if (prefetchInflight && prefetchInflight.url === url) return;
-
-        prefetchTriggered = true;
-        const ctrl = new AbortController();
-        prefetchInflight = { url, ctrl };
-        const t0 = performance.now();
-        fetch(url, { signal: ctrl.signal, cache: 'no-store' })
-            .then(r => r.ok ? r.arrayBuffer() : Promise.reject('http ' + r.status))
-            .then(buf => {
-                // LRU(2)：超出容量删最早的
-                while (prefetchCache.size >= PREFETCH_LRU_SIZE) {
-                    const firstKey = prefetchCache.keys().next().value;
-                    prefetchCache.delete(firstKey);
-                }
-                prefetchCache.set(url, { buf, size: buf.byteLength });
-                const ms = (performance.now() - t0).toFixed(0);
-                console.log(`[prefetch] ok ${fmtSize(buf.byteLength)} in ${ms}ms ${next.name}`);
-            })
-            .catch(err => {
-                if (err && err.name === 'AbortError') return;
-                console.warn('[prefetch] fail', next.name, err);
-            })
-            .finally(() => {
-                if (prefetchInflight && prefetchInflight.url === url) {
-                    prefetchInflight = null;
-                }
-            });
-    }
-
-    // 切日期时清空整个预拉缓存（不同日期 url 不一样，留着也命不中，纯占内存）
-    pbDate.addEventListener('change', () => {
-        prefetchCache.clear();
-        if (prefetchInflight) {
-            try { prefetchInflight.ctrl.abort(); } catch(e){}
-            prefetchInflight = null;
-        }
-    });
-
-    // ---------- 24h 时间轴 ----------
-    function resizeTimeline() {
-        // 让 canvas 像素与显示宽度对齐，避免高 DPI 模糊
-        const dpr = window.devicePixelRatio || 1;
-        const cssW = tlCanvas.clientWidth || tlCanvas.parentElement.clientWidth || 800;
-        const cssH = 56;
-        tlCanvas.width  = Math.max(200, Math.floor(cssW * dpr));
-        tlCanvas.height = Math.floor(cssH * dpr);
-        tlCanvas.style.height = cssH + 'px';
-        drawTimeline();
-    }
-    function drawTimeline() {
-        const ctx = tlCanvas.getContext('2d');
-        const W = tlCanvas.width, H = tlCanvas.height;
-        const DAY = 86400;
-        ctx.clearRect(0, 0, W, H);
-        // 背景刻度
-        ctx.fillStyle = '#0a1830'; ctx.fillRect(0, 0, W, H);
-        ctx.strokeStyle = '#ffffff20'; ctx.fillStyle = '#cfd8e6';
-        ctx.font = (12 * (window.devicePixelRatio||1)) + 'px monospace';
-        ctx.textBaseline = 'top';
-        for (let h = 0; h <= 24; h++) {
-            const x = Math.round(W * (h / 24));
-            ctx.beginPath();
-            ctx.moveTo(x, H - (h % 6 === 0 ? 18 : 10));
-            ctx.lineTo(x, H);
-            ctx.stroke();
-            if (h % 3 === 0 && h < 24) {
-                ctx.fillText((h<10?'0':'') + h + ':00', x + 4, 4);
-            }
-        }
-        // 录像色块
-        ctx.fillStyle = '#5db8ff';
-        for (const s of pbSegments) {
-            const x1 = (s.sec / DAY) * W;
-            const x2 = ((s.sec + (s.dur||600)) / DAY) * W;
-            ctx.fillRect(x1, 18, Math.max(1, x2 - x1), H - 28);
-        }
-        // 当前片高亮 + 播放游标
-        if (pbCurIdx >= 0 && pbCurIdx < pbSegments.length) {
-            const s = pbSegments[pbCurIdx];
-            ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
-            const x1 = (s.sec / DAY) * W;
-            const x2 = ((s.sec + (s.dur||600)) / DAY) * W;
-            ctx.strokeRect(x1, 18, Math.max(1, x2 - x1), H - 28);
-            // 红色游标
-            const t = pbVideo.currentTime || 0;
-            const cursorSec = s.sec + Math.min(t, s.dur || 600);
-            const cx = (cursorSec / DAY) * W;
-            ctx.strokeStyle = '#e23'; ctx.lineWidth = 2;
-            ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, H); ctx.stroke();
-        }
-    }
-    function tlSecAt(clientX) {
-        const rect = tlCanvas.getBoundingClientRect();
-        const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-        return Math.floor(ratio * 86400);
-    }
-    function findSegAtSec(sec) {
-        for (let i = 0; i < pbSegments.length; i++) {
-            const s = pbSegments[i];
-            if (sec >= s.sec && sec < s.sec + (s.dur || 600)) return i;
-        }
-        return -1;
-    }
-    tlCanvas.addEventListener('click', (ev) => {
-        const sec = tlSecAt(ev.clientX);
-        const idx = findSegAtSec(sec);
-        if (idx >= 0) {
-            const off = sec - pbSegments[idx].sec;
-            playSeg(idx, off);
-        } else {
-            // 点空白：跳到时间点之后的第一段（找第一个 sec >= clickSec）
-            const next = pbSegments.findIndex(s => s.sec >= sec);
-            if (next >= 0) playSeg(next, 0);
-        }
-    });
-    tlCanvas.addEventListener('mousemove', (ev) => {
-        const sec = tlSecAt(ev.clientX);
-        const hh = Math.floor(sec/3600), mm = Math.floor((sec/60)%60), ss = sec%60;
-        const idx = findSegAtSec(sec);
-        const txt = `${(hh<10?'0':'')+hh}:${(mm<10?'0':'')+mm}:${(ss<10?'0':'')+ss}` +
-                    (idx >= 0 ? ` · 第 ${idx+1}/${pbSegments.length} 段` : ' · 无录像');
-        tlTip.textContent = txt;
-        tlTip.style.display = 'block';
-        const rect = tlCanvas.getBoundingClientRect();
-        tlTip.style.left = (ev.clientX - rect.left) + 'px';
-        tlTip.style.top  = '0px';
-    });
-    tlCanvas.addEventListener('mouseleave', () => { tlTip.style.display = 'none'; });
-
-    // ============================================================
-    // 相册 Tab：网格 + 多选 + 删除 + 大图查看
-    // ============================================================
-    let albumInited = false;
-    let albumDirty  = false;   // 拍完照后标 true，下次进入相册自动刷新
-    let albumItems  = [];      // [{name,size,mtime}]
-    const selected  = new Set();
-
-    const abRefresh  = document.getElementById('abRefresh');
-    const abSelAll   = document.getElementById('abSelAll');
-    const abSelNone  = document.getElementById('abSelNone');
-    const abDownload = document.getElementById('abDownload');
-    const abDelete   = document.getElementById('abDelete');
-    const abStat     = document.getElementById('abStat');
-    const albumGrid  = document.getElementById('albumGrid');
-    const albumEmpty = document.getElementById('albumEmpty');
-    const lightbox   = document.getElementById('lightbox');
-    const lbImg      = document.getElementById('lbImg');
-    const lbDownload = document.getElementById('lbDownload');
-
-    function initAlbum() {
-        albumInited = true;
-        abRefresh.onclick  = () => loadAlbum();
-        abSelAll.onclick   = () => { for (const it of albumItems) selected.add(it.name); renderAlbum(); };
-        abSelNone.onclick  = () => { selected.clear(); renderAlbum(); };
-        abDownload.onclick = onDownloadSelected;
-        abDelete.onclick   = onDeleteSelected;
-        // lightbox 背景点击关闭；但下载按钮上的点击要 stopPropagation，
-        // 否则点"下载"会先触发 a[download]、再冒泡到 lightbox 关闭，体验不连贯
-        lbDownload.addEventListener('click', (ev) => {
-            ev.stopPropagation();
-            ev.preventDefault();
-            const href  = lbDownload.getAttribute('href') || '';
-            const fname = lbDownload.getAttribute('download') || '';
-            if (!href || href === '#') return;
-            // 大图下载：走 fetch+Blob 而不是 a[download] 原生跳转，
-            // 否则 https 自签名时 Chrome 会以"网络错误"失败
-            downloadViaFetch(href, fname, (msg) => { abStat.textContent = msg; });
-        });
-        lightbox.addEventListener('click', (ev) => {
-            // 只有点到 lightbox 自身（黑色蒙层）或图片才关闭，下载按钮不关闭
-            if (ev.target === lbDownload) return;
-            lightbox.style.display = 'none';
-            lbImg.src = '';
-            lbDownload.removeAttribute('href');
-        });
-    }
-
-    async function refreshAlbum() {
-        if (albumDirty || albumItems.length === 0) {
-            albumDirty = false;
-            await loadAlbum();
-        }
-    }
-
-    async function loadAlbum() {
-        abStat.textContent = '加载中…';
-        const r = await api('GET', '/api/photo/list?ts=' + Date.now());
-        if (!r.ok) { abStat.textContent = '加载失败'; return; }
-        albumItems = Array.isArray(r.data) ? r.data : [];
-        // 清理已被删掉的选中项
-        for (const n of [...selected]) if (!albumItems.find(it => it.name === n)) selected.delete(n);
-        renderAlbum();
-    }
-
-    function fmtTime(yyyymmdd_hhmmss_NNN) {
-        // 文件名形如 20260523_141502_001.jpg
-        const m = /^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})_(\d{3})\.jpg$/.exec(yyyymmdd_hhmmss_NNN || '');
-        if (!m) return yyyymmdd_hhmmss_NNN || '';
-        return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
-    }
-
-    function renderAlbum() {
-        if (albumItems.length === 0) {
-            albumGrid.innerHTML = '';
-            albumEmpty.style.display = 'block';
-            abStat.textContent = '共 0 张';
-            updateDelBtn();
-            return;
-        }
-        albumEmpty.style.display = 'none';
-        const html = albumItems.map(it => {
-            const sel = selected.has(it.name) ? 'sel' : '';
-            const url = '/photo/' + encodeURIComponent(it.name);
-            return `<div class="ph ${sel}" data-name="${it.name}">
-                <img loading="lazy" src="${url}" alt="${it.name}">
-                <div class="chk"></div>
-                <div class="meta">${fmtTime(it.name)} · ${fmtSize(it.size)}</div>
-            </div>`;
-        }).join('');
-        albumGrid.innerHTML = html;
-        abStat.textContent = `共 ${albumItems.length} 张 · 已选 ${selected.size}`;
-        updateDelBtn();
-    }
-    function updateDelBtn() {
-        const empty = selected.size === 0;
-        abDelete.disabled   = empty;
-        abDownload.disabled = empty;
-    }
-
-    albumGrid && (albumGrid.onclick = (ev) => {
-        const ph = ev.target.closest('.ph');
-        if (!ph) return;
-        const name = ph.getAttribute('data-name');
-        // 点击选择框 → 切换选中；点击图片其他部分 → 大图查看
-        if (ev.target.closest('.chk')) {
-            if (selected.has(name)) selected.delete(name);
-            else                    selected.add(name);
-            ph.classList.toggle('sel');
-            abStat.textContent = `共 ${albumItems.length} 张 · 已选 ${selected.size}`;
-            updateDelBtn();
-            return;
-        }
-        // 否则打开 lightbox
-        const url = '/photo/' + encodeURIComponent(name);
-        lbImg.src = url;
-        // 同步下载按钮指向当前查看的图片，浏览器看到 a[download] 会触发"另存为"
-        lbDownload.href = url;
-        lbDownload.setAttribute('download', name);
-        lightbox.style.display = 'flex';
-    });
-
-    async function onDeleteSelected() {
-        if (selected.size === 0) return;
-        const names = [...selected];
-        if (!confirm(`确定删除 ${names.length} 张照片吗？此操作不可撤销。`)) return;
-        abDelete.disabled = true;
-        abStat.textContent = '删除中…';
-        try {
-            const r = await api('POST', '/api/photo/delete', { names });
-            if (!r.ok || !r.data || !r.data.ok) {
-                abStat.textContent = '删除失败：HTTP ' + r.status;
-                alert('删除失败：HTTP ' + r.status);
-                return;
-            }
-            const d = r.data;
-            // 极端兜底：服务端返回 ok 但什么都没删（旧版 httpServer 在 body 跨 TCP 段时会
-            // 漏读，导致 names 解析为空）；提示用户而不是装作成功
-            if (d.deleted === 0 && (d.missing || 0) === 0 &&
-                (!d.errors || d.errors.length === 0) && names.length > 0) {
-                abStat.textContent = '删除请求未生效（服务端未识别到任何文件，请检查后端版本）';
-                alert('删除未生效：服务端未识别到任何文件名。\n' +
-                      '请确认后端已升级（HTTP body 完整读取修复）。');
-                return;
-            }
-            selected.clear();
-            await loadAlbum();
-            abStat.textContent = `已删除 ${d.deleted} 张` +
-                (d.missing ? `（${d.missing} 张已不存在）` : '') +
-                (d.errors && d.errors.length ? `，错误 ${d.errors.length}` : '');
-        } catch (e) {
-            console.error('delete photos fail:', e);
-            abStat.textContent = '删除失败：' + (e && e.message ? e.message : e);
-            alert('删除失败：' + (e && e.message ? e.message : e));
-        } finally {
-            updateDelBtn();
-        }
-    }
-
-    // 多选批量下载：串行 fetch+Blob 触发每张图保存。
-    //
-    // 走 fetch 而不是 a[download] 的原因：
-    //   https + 自签名证书时，<a download> 触发的下载会被 Chrome 视为新的安全场景
-    //   重新校验证书，进而以 net::ERR_CERT_AUTHORITY_INVALID 失败（页面里看到
-    //   "失败 - 网络错误"）；而 fetch 复用页面 Tab 已忽略警告的 TLS 通道，能稳定下载。
-    //
-    // 浏览器侧的限制：
-    //   1) Chrome/Edge 默认会拦截"短时间内多次自动下载"，第一次会弹一个"该网站尝试下载多个文件"
-    //      的横幅，用户点"允许"后续才能放行；这是浏览器主动行为，前端无法绕过；
-    //   2) 我们用 await 串行 + setTimeout 间隔 ~150ms，降低被聚合拦截的概率；
-    //   3) 文件较大时浏览器会把整张图先放进内存再 saveAs，对单张图（< 数 MB）影响不大。
-    async function onDownloadSelected() {
-        if (selected.size === 0) return;
-        const names = [...selected];
-        abDownload.disabled = true;
-        let okCnt = 0, failCnt = 0;
-        for (let i = 0; i < names.length; i++) {
-            const name = names[i];
-            abStat.textContent = `下载中 ${i + 1}/${names.length} · ${name}`;
-            const ok = await downloadViaFetch('/photo/' + encodeURIComponent(name), name, null);
-            if (ok) okCnt++; else failCnt++;
-            // 间隔一下，规避浏览器"多文件下载"聚合拦截
-            if (i < names.length - 1) {
-                await new Promise(r => setTimeout(r, 150));
-            }
-        }
-        abStat.textContent =
-            `下载完成 · 成功 ${okCnt}` +
-            (failCnt ? ` · 失败 ${failCnt}` : '') +
-            (names.length > 1 ? '（首次浏览器可能弹"允许多个文件下载"提示）' : '');
-        updateDelBtn();
-    }
-
-    // ============================================================
-    // 设置 Tab：GET /api/config 加载，POST /api/config 保存
-    //
-    // - 字段命名与后端 C_AppConfig::Snapshot 完全一致；用 id="cfg_<key>" 约定批量绑定
-    // - record_max_bytes 在 UI 上以 GB 展示；保存时换算回 byte
-    // - 保存只发"实际改过"的字段（patch 语义），但实现上简化为全量提交，
-    //   后端 ApplyPatch 容忍未变化字段（写盘开销可忽略）
-    // ============================================================
-    let cfgInited = false;
-    const cfgEl = {};
-    const cfgIds = [
-        'cfg_ai_enabled', 'cfg_ai_threshold',
-        'cfg_ai_min_interval_s', 'cfg_ai_infer_fps',
-        'cfg_vmd_enabled', 'cfg_vmd_pixel_thresh', 'cfg_vmd_area_ratio',
-        'cfg_vmd_min_interval_s', 'cfg_vmd_check_fps',
-        'cfg_record_segment_s', 'cfg_record_retain_days', 'cfg_record_max_gb',
-        'cfg_album_max_photos', 'cfg_photo_jpeg_qual', 'cfg_mic_filter_mode',
-        'cfg_osd_show_ip', 'cfg_osd_show_time', 'cfg_osd_show_ai_box',
-        'cfg_mqtt_enabled', 'cfg_mqtt_broker_host', 'cfg_mqtt_broker_port',
-        'cfg_mqtt_topic', 'cfg_mqtt_client_id', 'cfg_mqtt_poll_sec', 'cfg_mqtt_iface',
-        'cfg_mqtt_report_interval_s', 'cfg_mqtt_retain'
-    ];
-    const cfgStat = () => document.getElementById('cfgStat');
-
-    function initSettings() {
-        cfgInited = true;
-        for (const id of cfgIds) cfgEl[id] = document.getElementById(id);
-        document.getElementById('cfgReload').addEventListener('click', loadConfig);
-        document.getElementById('cfgSave').addEventListener('click', saveConfig);
-        loadConfig();
-    }
-
-    function fillForm(c) {
-        cfgEl.cfg_ai_enabled.checked         = !!c.ai_enabled;
-        cfgEl.cfg_ai_threshold.value         = c.ai_threshold;
-        cfgEl.cfg_ai_min_interval_s.value    = c.ai_min_interval_s;
-        cfgEl.cfg_ai_infer_fps.value         = c.ai_infer_fps;
-        cfgEl.cfg_vmd_enabled.checked        = !!c.vmd_enabled;
-        cfgEl.cfg_vmd_pixel_thresh.value     = (c.vmd_pixel_thresh   !== undefined) ? c.vmd_pixel_thresh   : 25;
-        cfgEl.cfg_vmd_area_ratio.value       = (c.vmd_area_ratio     !== undefined) ? c.vmd_area_ratio     : 0.02;
-        cfgEl.cfg_vmd_min_interval_s.value   = (c.vmd_min_interval_s !== undefined) ? c.vmd_min_interval_s : 2;
-        cfgEl.cfg_vmd_check_fps.value        = (c.vmd_check_fps      !== undefined) ? c.vmd_check_fps      : 5;
-        cfgEl.cfg_record_segment_s.value     = c.record_segment_s;
-        cfgEl.cfg_record_retain_days.value   = c.record_retain_days;
-        // 后端是 byte，UI 展示 GB（向上取整到整 GB；不足 1GB 显 1）
-        const gb = Math.max(1, Math.round(Number(c.record_max_bytes) / (1024*1024*1024)));
-        cfgEl.cfg_record_max_gb.value        = gb;
-        cfgEl.cfg_album_max_photos.value     = c.album_max_photos;
-        cfgEl.cfg_photo_jpeg_qual.value      = c.photo_jpeg_qual;
-        cfgEl.cfg_mic_filter_mode.value      = (c.mic_filter_mode !== undefined) ? c.mic_filter_mode : 0;
-        cfgEl.cfg_osd_show_ip.checked        = !!c.osd_show_ip;
-        cfgEl.cfg_osd_show_time.checked      = !!c.osd_show_time;
-        cfgEl.cfg_osd_show_ai_box.checked    = (c.osd_show_ai_box !== undefined) ? !!c.osd_show_ai_box : true;
-        cfgEl.cfg_mqtt_enabled.checked       = !!c.mqtt_enabled;
-        cfgEl.cfg_mqtt_broker_host.value     = (c.mqtt_broker_host !== undefined) ? c.mqtt_broker_host : 'broker.emqx.io';
-        cfgEl.cfg_mqtt_broker_port.value     = (c.mqtt_broker_port !== undefined) ? c.mqtt_broker_port : 1883;
-        cfgEl.cfg_mqtt_topic.value           = (c.mqtt_topic       !== undefined) ? c.mqtt_topic       : 'cam/ipv6';
-        cfgEl.cfg_mqtt_client_id.value       = (c.mqtt_client_id   !== undefined) ? c.mqtt_client_id   : 'v831cam';
-        cfgEl.cfg_mqtt_poll_sec.value        = (c.mqtt_poll_sec    !== undefined) ? c.mqtt_poll_sec    : 10;
-        cfgEl.cfg_mqtt_iface.value           = (c.mqtt_iface       !== undefined) ? c.mqtt_iface       : 'wlan0';
-        cfgEl.cfg_mqtt_report_interval_s.value = (c.mqtt_report_interval_s !== undefined) ? c.mqtt_report_interval_s : 3600;
-        cfgEl.cfg_mqtt_retain.checked        = (c.mqtt_retain !== undefined) ? !!c.mqtt_retain : true;
-    }
-
-    async function loadConfig() {
-        cfgStat().textContent = '加载中…';
-        const r = await api('GET', '/api/config');
-        if (!r.ok) { cfgStat().textContent = '加载失败 ' + r.status; return; }
-        try {
-            fillForm(r.data);
-            cfgStat().textContent = '已加载';
-        } catch (e) {
-            cfgStat().textContent = '解析失败：' + e.message;
-        }
-    }
-
-    async function saveConfig() {
-        const gb = parseInt(cfgEl.cfg_record_max_gb.value, 10) || 1;
-        const payload = {
-            ai_enabled:         cfgEl.cfg_ai_enabled.checked,
-            ai_threshold:       parseFloat(cfgEl.cfg_ai_threshold.value),
-            ai_min_interval_s:  parseInt(cfgEl.cfg_ai_min_interval_s.value, 10),
-            ai_infer_fps:       parseInt(cfgEl.cfg_ai_infer_fps.value, 10),
-            vmd_enabled:        cfgEl.cfg_vmd_enabled.checked,
-            vmd_pixel_thresh:   parseInt(cfgEl.cfg_vmd_pixel_thresh.value, 10),
-            vmd_area_ratio:     parseFloat(cfgEl.cfg_vmd_area_ratio.value),
-            vmd_min_interval_s: parseInt(cfgEl.cfg_vmd_min_interval_s.value, 10),
-            vmd_check_fps:      parseInt(cfgEl.cfg_vmd_check_fps.value, 10),
-            record_segment_s:   parseInt(cfgEl.cfg_record_segment_s.value, 10),
-            record_retain_days: parseInt(cfgEl.cfg_record_retain_days.value, 10),
-            record_max_bytes:   gb * 1024 * 1024 * 1024,
-            album_max_photos:   parseInt(cfgEl.cfg_album_max_photos.value, 10),
-            photo_jpeg_qual:    parseInt(cfgEl.cfg_photo_jpeg_qual.value, 10),
-            mic_filter_mode:    parseInt(cfgEl.cfg_mic_filter_mode.value, 10),
-            osd_show_ip:        cfgEl.cfg_osd_show_ip.checked,
-            osd_show_time:      cfgEl.cfg_osd_show_time.checked,
-            osd_show_ai_box:    cfgEl.cfg_osd_show_ai_box.checked,
-            mqtt_enabled:       cfgEl.cfg_mqtt_enabled.checked,
-            mqtt_broker_host:   cfgEl.cfg_mqtt_broker_host.value.trim(),
-            mqtt_broker_port:   parseInt(cfgEl.cfg_mqtt_broker_port.value, 10),
-            mqtt_topic:         cfgEl.cfg_mqtt_topic.value.trim(),
-            mqtt_client_id:     cfgEl.cfg_mqtt_client_id.value.trim(),
-            mqtt_poll_sec:      parseInt(cfgEl.cfg_mqtt_poll_sec.value, 10),
-            mqtt_iface:         cfgEl.cfg_mqtt_iface.value.trim(),
-            mqtt_report_interval_s: parseInt(cfgEl.cfg_mqtt_report_interval_s.value, 10),
-            mqtt_retain:        cfgEl.cfg_mqtt_retain.checked,
-        };
-        cfgStat().textContent = '保存中…';
-        const r = await api('POST', '/api/config', payload);
-        if (!r.ok) { cfgStat().textContent = '保存失败 ' + r.status; return; }
-        if (r.data && r.data.config) {
-            fillForm(r.data.config);   // 后端 clamp 后再回填
-            cfgStat().textContent = '已保存（已 clamp 到合法区间）';
-        } else {
-            cfgStat().textContent = '已保存';
-        }
-    }
-
-})();
-</script>
+<script src="app.js?v=20260716"></script>
 </body>
 </html>

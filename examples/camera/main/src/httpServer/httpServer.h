@@ -72,6 +72,8 @@ public:
 private:
     void AcceptThread();
     void ProcessClient(int fd, std::shared_ptr<C_SslConn> ssl);
+    void ReapClientThreads();
+    void JoinClientThreads();
     void HandleHttpRequest(int fd, C_SslConn* ssl, const std::string& request);
     void SendHttpResponse(int fd, C_SslConn* ssl,
                           int statusCode, const std::string& statusText, 
@@ -106,7 +108,7 @@ private:
 private:
     int m_port;
     int m_server_fd;
-    bool m_bRunFlag;
+    std::atomic<bool> m_bRunFlag{false};
     std::string m_webRoot;
     std::thread m_acceptThread;
     std::mutex m_clientsMutex;
@@ -129,4 +131,11 @@ private:
     // 超过上限的新连接直接 close，浏览器侧会自动排队重试，不影响功能。
     std::atomic<int>                    m_activeClients{0};
     int                                 m_maxConcurrent = 6;
+
+    struct ClientThread {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> done;
+    };
+    // accept 线程负责添加/回收；Stop 在 join accept 后接管并全部 join。
+    std::vector<ClientThread> m_clientThreads;
 };

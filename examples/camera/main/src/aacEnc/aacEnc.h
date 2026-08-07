@@ -11,6 +11,7 @@
 #include <iostream>
 #include <thread>
 #include <mutex>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 
@@ -24,6 +25,11 @@ extern "C" {
     #include <libavcodec/avcodec.h>
     #include <libswresample/swresample.h>
 }
+
+// 麦克风实时响度（0~100，低响度区放大后封顶）。由 AAC 采集线程每 20ms 更新一次，
+// 供补光灯声控触发等模块跨线程无锁读取；未在采集时返回 0。
+// 放全局函数而非 C_AacEnc 成员，是为了让 lightController 不必持有编码器实例。
+int AacEnc_GetMicLoudness();
 
 class C_AacEnc
 {
@@ -54,6 +60,11 @@ public:
     C_AacEnc(C_Listener* pListener);
     ~C_AacEnc();
 
+    // 构造函数只初始化 ALSA/FFmpeg 资源，不启动线程。由宿主在所有回调依赖
+    // 都构造完成后显式 Start，退出时先 Stop 再销毁 listener。
+    int Start();
+    void Stop();
+
     // AAC-LC 的 AudioSpecificConfig（用于 fMP4 esds box）
     // 返回长度，data 由内部维护，调用方仅读取
     const unsigned char* GetAudioSpecificConfig(unsigned int* outLen) const;
@@ -82,7 +93,7 @@ private:
     unsigned char     m_asc[2]         = {0};   // AudioSpecificConfig
     unsigned int      m_ascLen         = 0;
 
-    bool              m_bRun           = false;
+    std::atomic<bool> m_bRun{false};
     std::unique_ptr<std::thread> m_pCaptureEncoderThread;
 
     // 调试用：若环境变量 AAC_DUMP_PATH 被设置，则以 ADTS 头方式 dump 到该文件

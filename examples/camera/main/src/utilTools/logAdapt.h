@@ -10,6 +10,28 @@
 #include <sstream>
 #include <fstream>
 
+// 日志 sink：把每条已格式化好的完整日志行分叉出去（如推送到 web）。
+// logAdapt 只认识这个抽象接口，不依赖任何具体实现（WebSocket 等），避免
+// 底层日志模块反向依赖上层网络模块造成的循环依赖。
+class ILogSink
+{
+public:
+    virtual ~ILogSink() = default;
+    // line 为以 '\0' 结尾的完整日志行（含时间/级别/文件行号），len 为其长度。
+    // 实现必须"只入队、不阻塞、不再打日志"，真正的耗时 IO 放到自己的线程里做。
+    virtual void OnLogLine(const char* line, unsigned int len) = 0;
+};
+
+// 注册/注销全局日志 sink（传 nullptr 注销）。set-once/clear-at-shutdown 语义，
+// 内部用单个原子指针发布，读侧无锁。
+void SetLogSink(ILogSink* sink);
+
+// 抑制"当前线程"产生的日志进入 sink。用于两类场景：
+//   1) sink->OnLogLine 内部若同步打了日志（同线程递归）；
+//   2) sink 的推送线程在广播时若打了日志（否则会把自己的日志再灌回队列）。
+// LogInner 仍会照常写 stdout / run.log，仅跳过 sink 分叉。
+void SetThreadLogSuppressed(bool suppressed);
+
 /*C_LogAdapt类，
 * 该类提供的打印接口提供以下日志输出格式
 * 日志格式:日志产生时间 日志级别:[ 自定义key信息 ]<文件名:函数名:行号>: 日志

@@ -31,8 +31,14 @@
 #include <chrono>
 #include <fstream>
 #include <sstream>
+#include <algorithm>
+#include <limits>
 
 namespace {
+
+static const size_t kMaxHeaderBytes = 16 * 1024;
+static const size_t kMaxBodyBytes   = 1024 * 1024;
+static const auto   kRequestReadTimeout = std::chrono::seconds(10);
 
 // 取可执行文件所在目录。失败时返回 "."（当前工作目录）
 std::string GetExeDir()
@@ -113,7 +119,6 @@ std::string SanitizeUrlPath(const std::string& urlPath)
 C_HttpServer::C_HttpServer(int port)
     : m_port(port)
     , m_server_fd(-1)
-    , m_bRunFlag(true)
 {
     // 默认 web 根：<exe_dir>/web
     m_webRoot = GetExeDir() + "/web";
@@ -127,6 +132,11 @@ C_HttpServer::~C_HttpServer()
 
 int C_HttpServer::Start()
 {
+    bool expected = false;
+    if (!m_bRunFlag.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return 0;
+    }
+
     // ---------------- HTTP 监听 ----------------
     // 用 AF_INET6 双栈：关闭 IPV6_V6ONLY 后，单个 socket 同时接收 IPv6 与 IPv4
     // 连接（IPv4 客户端以 IPv4-mapped 地址 ::ffff:a.b.c.d 形式进来）。
@@ -134,6 +144,7 @@ int C_HttpServer::Start()
     m_server_fd = socket(AF_INET6, SOCK_STREAM, 0);
     if (m_server_fd < 0) {
         CLOG_ERR("HTTP socket creation failed: %s\n", strerror(errno));
+        m_bRunFlag.store(false, std::memory_order_release);
         return -1;
     }
 
@@ -143,6 +154,7 @@ int C_HttpServer::Start()
         CLOG_ERR("HTTP setsockopt failed: %s\n", strerror(errno));
         close(m_server_fd);
         m_server_fd = -1;
+        m_bRunFlag.store(false, std::memory_order_release);
         return -1;
     }
     // 关闭 v6only，让一个 v6 socket 同时收 v4+v6（系统默认 bindv6only=0，这里显式确保）
@@ -164,6 +176,7 @@ int C_HttpServer::Start()
         CLOG_ERR("HTTP bind failed: %s\n", strerror(errno));
         close(m_server_fd);
         m_server_fd = -1;
+        m_bRunFlag.store(false, std::memory_order_release);
         return -1;
     }
 
@@ -172,6 +185,7 @@ int C_HttpServer::Start()
         CLOG_ERR("HTTP listen failed: %s\n", strerror(errno));
         close(m_server_fd);
         m_server_fd = -1;
+        m_bRunFlag.store(false, std::memory_order_release);
         return -1;
     }
 
@@ -208,7 +222,16 @@ int C_HttpServer::Start()
     }
 
     // Start accept thread
-    m_acceptThread = std::thread(&C_HttpServer::AcceptThread, this);
+    try {
+        // 一轮 select 最多同时接收 HTTP/HTTPS 各一个，额外预留两个槽，
+        // 确保启动工作线程后 vector::push_back 不再触发分配。
+        m_clientThreads.reserve((size_t)m_maxConcurrent + 2);
+        m_acceptThread = std::thread(&C_HttpServer::AcceptThread, this);
+    } catch (...) {
+        Stop();
+        CLOG_ERR("HTTP accept thread creation failed\n");
+        return -1;
+    }
 
     return 0;
 }
@@ -221,20 +244,24 @@ void C_HttpServer::EnableTls(int tlsPort, C_TlsContext* pTls)
 
 void C_HttpServer::Stop()
 {
-    m_bRunFlag = false;
+    m_bRunFlag.store(false, std::memory_order_release);
+
+    if (m_server_fd >= 0) shutdown(m_server_fd, SHUT_RDWR);
+    if (m_tlsServerFd >= 0) shutdown(m_tlsServerFd, SHUT_RDWR);
 
     if (m_acceptThread.joinable()) {
         m_acceptThread.join();
     }
 
-    // Close all client connections
+    // 只 shutdown 唤醒工作线程，最终 close 由工作线程唯一负责，避免 fd 复用后
+    // Stop 与线程退出路径发生重复 close。
     {
         std::lock_guard<std::mutex> lock(m_clientsMutex);
         for (int fd : m_clientFds) {
-            close(fd);
+            shutdown(fd, SHUT_RDWR);
         }
-        m_clientFds.clear();
     }
+    JoinClientThreads();
 
     if (m_server_fd >= 0) {
         close(m_server_fd);
@@ -243,6 +270,10 @@ void C_HttpServer::Stop()
     if (m_tlsServerFd >= 0) {
         close(m_tlsServerFd);
         m_tlsServerFd = -1;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_clientsMutex);
+        m_clientFds.clear();
     }
 
     CLOG_INF("HTTP server stopped\n");
@@ -253,7 +284,8 @@ void C_HttpServer::AcceptThread()
     fd_set read_fds;
     struct timeval tv;
 
-    while (m_bRunFlag) {
+    while (m_bRunFlag.load(std::memory_order_acquire)) {
+        ReapClientThreads();
         FD_ZERO(&read_fds);
         FD_SET(m_server_fd, &read_fds);
         int max_fd = m_server_fd;
@@ -261,7 +293,7 @@ void C_HttpServer::AcceptThread()
             FD_SET(m_tlsServerFd, &read_fds);
             if (m_tlsServerFd > max_fd) max_fd = m_tlsServerFd;
         }
-        // 注：客户端 fd 不再加入 select —— 客户端处理走 detached thread，
+        // 注：客户端 fd 不再加入 select —— 客户端处理走独立工作线程，
         //   原代码这里加 client fd 没有意义（select 命中也不消费），保持简化。
 
         tv.tv_sec = 0;
@@ -283,6 +315,10 @@ void C_HttpServer::AcceptThread()
             socklen_t addr_len = sizeof(client_addr);
             int new_fd = accept(listenFd, (struct sockaddr *)&client_addr, &addr_len);
             if (new_fd < 0) return;
+            if (!m_bRunFlag.load(std::memory_order_acquire)) {
+                close(new_fd);
+                return;
+            }
 
             // ---- 并发上限保命：超出 m_maxConcurrent 直接拒绝，避免 detach 出大量线程
             // 把内存撑爆触发 std::bad_alloc → terminate（这是之前观察到的崩溃模式）
@@ -315,7 +351,11 @@ void C_HttpServer::AcceptThread()
                     close(new_fd);
                     return;
                 }
-                sslConn = std::shared_ptr<C_SslConn>(u.release());
+                sslConn = std::shared_ptr<C_SslConn>(std::move(u));
+            }
+            if (!m_bRunFlag.load(std::memory_order_acquire)) {
+                close(new_fd);
+                return;
             }
 
             {
@@ -327,8 +367,40 @@ void C_HttpServer::AcceptThread()
             CLOG_INF("HTTP%s new client connected: fd=%d (active=%d)\n",
                      isTls ? "S" : "", new_fd, m_activeClients.load());
 
-            std::thread clientThread(&C_HttpServer::ProcessClient, this, new_fd, sslConn);
-            clientThread.detach();
+            try {
+                auto done = std::make_shared<std::atomic<bool>>(false);
+                ClientThread worker;
+                worker.done = done;
+                worker.thread = std::thread([this, new_fd, sslConn, done]() {
+                    try {
+                        ProcessClient(new_fd, sslConn);
+                    } catch (const std::exception& e) {
+                        CLOG_ERR("HTTP client fd=%d exception: %s\n", new_fd, e.what());
+                        {
+                            std::lock_guard<std::mutex> lock(m_clientsMutex);
+                            m_clientFds.erase(new_fd);
+                        }
+                        close(new_fd);
+                    } catch (...) {
+                        CLOG_ERR("HTTP client fd=%d unknown exception\n", new_fd);
+                        {
+                            std::lock_guard<std::mutex> lock(m_clientsMutex);
+                            m_clientFds.erase(new_fd);
+                        }
+                        close(new_fd);
+                    }
+                    done->store(true, std::memory_order_release);
+                });
+                m_clientThreads.push_back(std::move(worker));
+            } catch (...) {
+                {
+                    std::lock_guard<std::mutex> lock(m_clientsMutex);
+                    m_clientFds.erase(new_fd);
+                }
+                close(new_fd);
+                m_activeClients.fetch_sub(1, std::memory_order_relaxed);
+                CLOG_ERR("HTTP client thread creation failed: fd=%d\n", new_fd);
+            }
         };
 
         if (FD_ISSET(m_server_fd, &read_fds)) {
@@ -338,6 +410,28 @@ void C_HttpServer::AcceptThread()
             handleAccept(m_tlsServerFd, true);
         }
     }
+    ReapClientThreads();
+}
+
+void C_HttpServer::ReapClientThreads()
+{
+    auto it = m_clientThreads.begin();
+    while (it != m_clientThreads.end()) {
+        if (!it->done || !it->done->load(std::memory_order_acquire)) {
+            ++it;
+            continue;
+        }
+        if (it->thread.joinable()) it->thread.join();
+        it = m_clientThreads.erase(it);
+    }
+}
+
+void C_HttpServer::JoinClientThreads()
+{
+    for (auto& worker : m_clientThreads) {
+        if (worker.thread.joinable()) worker.thread.join();
+    }
+    m_clientThreads.clear();
 }
 
 int C_HttpServer::IoRead(int fd, C_SslConn* ssl, void* buf, int len, bool& wantMore)
@@ -388,6 +482,9 @@ void C_HttpServer::ProcessClient(int fd, std::shared_ptr<C_SslConn> ssl)
     size_t headEnd     = std::string::npos;
     size_t contentLen  = 0;
     bool   haveCL      = false;
+    bool   invalidCL   = false;
+    const auto requestDeadline =
+        std::chrono::steady_clock::now() + kRequestReadTimeout;
 
     auto parseHeaderOnce = [&]() {
         if (headEnd != std::string::npos) return;
@@ -407,16 +504,32 @@ void C_HttpServer::ProcessClient(int fd, std::shared_ptr<C_SslConn> ssl)
             while (vp < head.size() && (head[vp] == ' ' || head[vp] == '\t')) ++vp;
             size_t le = head.find("\r\n", vp);
             if (le == std::string::npos) le = head.size();
+            size_t ve = le;
+            while (ve > vp && (head[ve - 1] == ' ' || head[ve - 1] == '\t')) --ve;
+            const std::string value = head.substr(vp, ve - vp);
             try {
-                contentLen = (size_t)std::stoul(head.substr(vp, le - vp));
+                size_t parsed = 0;
+                const unsigned long long raw = std::stoull(value, &parsed, 10);
+                if (value.empty() || parsed != value.size() ||
+                    raw > std::numeric_limits<size_t>::max()) {
+                    invalidCL = true;
+                    return;
+                }
+                contentLen = static_cast<size_t>(raw);
                 haveCL = true;
             } catch (...) {
-                contentLen = 0;
+                invalidCL = true;
             }
         }
     };
 
-    while (m_bRunFlag) {
+    while (m_bRunFlag.load(std::memory_order_acquire)) {
+        if (std::chrono::steady_clock::now() >= requestDeadline) {
+            SendHttpResponse(fd, ssl.get(), 408, "Request Timeout",
+                             "text/plain", "Request Timeout");
+            break;
+        }
+
         bool wantMore = false;
         int n = IoRead(fd, ssl.get(), buffer.data(), (int)buffer.size(), wantMore);
 
@@ -437,8 +550,30 @@ void C_HttpServer::ProcessClient(int fd, std::shared_ptr<C_SslConn> ssl)
 
         parseHeaderOnce();
         if (headEnd == std::string::npos) {
+            if (request.size() > kMaxHeaderBytes) {
+                SendHttpResponse(fd, ssl.get(), 431,
+                                 "Request Header Fields Too Large",
+                                 "text/plain", "Request Header Too Large");
+                break;
+            }
             // 请求头还没收完，继续读
             continue;
+        }
+        if (headEnd + 4 > kMaxHeaderBytes) {
+            SendHttpResponse(fd, ssl.get(), 431,
+                             "Request Header Fields Too Large",
+                             "text/plain", "Request Header Too Large");
+            break;
+        }
+        if (invalidCL) {
+            SendHttpResponse(fd, ssl.get(), 400, "Bad Request",
+                             "text/plain", "Invalid Content-Length");
+            break;
+        }
+        if (contentLen > kMaxBodyBytes) {
+            SendHttpResponse(fd, ssl.get(), 413, "Payload Too Large",
+                             "text/plain", "Payload Too Large");
+            break;
         }
 
         // 头已就绪：根据 Content-Length 判定 body 是否够长；

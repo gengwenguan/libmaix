@@ -50,24 +50,16 @@ project(${PROJECT_NAME})
 set(_web_src_dir "${CMAKE_CURRENT_LIST_DIR}/web")
 set(_web_dst_dir "${PROJECT_DIST_DIR}/web")
 if(EXISTS "${_web_src_dir}")
-    file(GLOB_RECURSE _web_src_files "${_web_src_dir}/*")
-    if(_web_src_files)
-        set(_web_dst_files)
-        foreach(_src_file ${_web_src_files})
-            file(RELATIVE_PATH _rel_path "${_web_src_dir}" "${_src_file}")
-            set(_dst_file "${_web_dst_dir}/${_rel_path}")
-            list(APPEND _web_dst_files "${_dst_file}")
-            add_custom_command(
-                OUTPUT  "${_dst_file}"
-                COMMAND ${CMAKE_COMMAND} -E make_directory "${_web_dst_dir}"
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_src_file}" "${_dst_file}"
-                DEPENDS "${_src_file}"
-                COMMENT "-- copy web asset ${_rel_path}"
-            )
-        endforeach()
-        add_custom_target(copy_web_assets ALL DEPENDS ${_web_dst_files})
-        add_dependencies(${PROJECT_NAME} copy_web_assets)
-    endif()
+    # 每次构建都整目录镜像 web/ → dist/web/。
+    # 不用 file(GLOB) 在配置期枚举文件：GLOB 是配置期快照，新增文件（如
+    # favicon.svg）若未重跑 cmake 配置就会漏拷，导致板上缺文件。copy_directory
+    # 与 cmake 版本无关、递归复制，保证任何新增/修改的 web 资源都会被带上。
+    add_custom_target(copy_web_assets ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${_web_dst_dir}"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${_web_src_dir}" "${_web_dst_dir}"
+        COMMENT "-- mirror web/ -> dist/web/"
+    )
+    add_dependencies(${PROJECT_NAME} copy_web_assets)
 endif()
 
 # ----------------------------------------------------------------------

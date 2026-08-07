@@ -8,6 +8,7 @@
 **********************************************************************************/ 
 #pragma once
 #include <fstream>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -28,6 +29,10 @@
 #include "tlsContext.h"
 #include "talkPlayer.h"
 #include "mqttReporter.h"
+#include "actionStore.h"
+#include "logBroadcaster.h"
+#include "sysInfoProvider.h"
+#include "lightController.h"
 
 class C_Terminal : public C_H264Enc::C_Listener,
                    public C_AacEnc::C_Listener,
@@ -40,6 +45,11 @@ public:
     // 本类不 own，不 destroy。
     C_Terminal(unsigned int Wight, unsigned int Hight, libmaix_cam_t* aiCam = nullptr);
     ~C_Terminal();
+
+    // 构造阶段只准备资源；所有成员就绪后由 main 显式启动会回调 Terminal 的
+    // AAC/HTTP/WebSocket 线程。Stop 幂等，并按依赖反序等待线程退出。
+    int Start();
+    void Stop();
 
     //送入采集数据
     int InputRgb888(unsigned char* inputData);
@@ -82,8 +92,8 @@ private:
     /*fmp4Muxer 输出一个 fragment（moof+mdat）*/
     void OnFragment   (const uint8_t* data, size_t len) override;
 
-    // 拿到 SPS/PPS（H264）+ ASC（AAC）后惰性创建 muxer
-    void TryInitMuxer();
+    // 拿到 SPS/PPS（H264）+ ASC（AAC）后惰性创建并返回稳定引用
+    std::shared_ptr<C_Fmp4Muxer> GetOrCreateMuxer();
 
 private:
     unsigned int m_Wight;
@@ -98,7 +108,8 @@ private:
     std::unique_ptr<C_AacEnc>          m_pAacEnc;
 
     // fMP4 muxer：在拿到 SPS/PPS（首帧 IDR 后）+ ASC 后才能创建
-    std::unique_ptr<C_Fmp4Muxer>       m_pMuxer;
+    std::mutex                         m_muxerMutex;
+    std::shared_ptr<C_Fmp4Muxer>       m_pMuxer;
 
     // 录像（订阅 LiveHub，10 分钟一片滚动落盘）
     std::unique_ptr<C_RollingRecorder> m_pRecorder;
@@ -129,6 +140,26 @@ private:
 
     // IPv6 地址变化 MQTT 上报（默认关闭，由 AppConfig.mqtt_* 控制）
     std::unique_ptr<C_MqttReporter>    m_pMqttReporter;
+    std::atomic<bool>                  m_started{false};
+
+    // 设备动作代理：web 上可增删的"按钮→URL"映射，点击后由后端出站 POST。
+    // 配置持久化到 <exeDir>/actions.json。
+    std::unique_ptr<C_ActionStore>     m_pActionStore;
+    std::string                        m_actionsPath;
+
+    // 日志广播：把 CLOG_* 输出实时推送给 /ws/log 订阅者（web 折叠日志框）。
+    // 仅在有订阅者时才真正入队/推送；生命周期跟随 Start/Stop。
+    std::unique_ptr<C_LogBroadcaster>  m_pLogBroadcaster;
+    std::mutex                         m_logFdsMutex;
+    std::set<int>                      m_logFds;   // 已握手的 /ws/log 客户端 fd
+
+    // 系统信息采集（CPU/内存/磁盘/温度…）：供 /api/sysinfo 展示。
+    // 持有对象是因为 CPU 使用率要跨两次请求做 /proc/stat 差值。
+    std::unique_ptr<C_SysInfoProvider> m_pSysInfo;
+
+    // 外接补光灯控制（GPIO，默认 PH13=237）：常驻线程按 AppConfig.light_* +
+    // 本地时间 + 麦克风响度评估点亮。始终 Start，未启用时空转并保证灯灭。
+    std::unique_ptr<C_LightController> m_pLight;
 
     // 注册 HTTP API（录像目录浏览/下载等）
     void RegisterHttpApis();

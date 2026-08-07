@@ -102,7 +102,8 @@ C_Fmp4Muxer::C_Fmp4Muxer(C_Listener* pListener,
     AVDictionary* opt = nullptr;
     av_dict_set(&opt, "movflags",
                 "frag_keyframe+empty_moov+default_base_moof+negative_cts_offsets", 0);
-    av_dict_set(&opt, "frag_duration", "500000", 0);   // 500ms 兜底
+    // 不设置 frag_duration：它会强制在 P 帧处切片，破坏“每片从 IDR 开始”的
+    // 前提。直播发送队列丢弃旧片、录像滚动切文件都依赖片段可独立解码。
 
     // 6) 写头部：触发 ftyp+moov 输出
     ret = avformat_write_header(m_fmtCtx, &opt);

@@ -72,6 +72,19 @@ public:
         bool   osd_show_time   = true;
         bool   osd_show_ai_box = true;   // 是否在 cam0 画面上叠加 AI 检测框（仅 ai_enabled=true 时有意义）
 
+        // ---- 外接补光灯（GPIO 开关，默认 PH13=237）----
+        // 由 lightController 常驻线程按北京时间（UTC+8）+ 麦克风响度评估是否点亮。
+        bool   light_enabled     = false;  // 总开关，默认关（关时确保灯灭并空转）
+        int    light_mode        = 0;      // 0=时段内常亮；1=时段内声控触发
+        int    light_start_hour  = 18;     // 点亮时段起始小时[0,23]；start==end 视为全天
+        int    light_end_hour    = 6;      // 点亮时段结束小时[0,23]；支持跨零点（18->6=傍晚到清晨）
+        int    light_sound_thresh= 35;     // 声控模式：麦克风响度阈值[0,100]，>=触发
+        // 响度量程版本：1/缺失=原始 0~100；2=0~1000；3=低响度再放大 5 倍并封顶 100。
+        int    light_sound_scale_version = 3;
+        int    light_hold_s      = 30;     // 声控模式：触发后持续点亮秒数[1,3600]
+        int    light_gpio        = 237;    // 控制脚 sysfs 编号（PH13=237；换脚免改代码）
+        bool   light_active_low  = false;  // true=低电平点亮（兼容部分灯板）
+
         // ---- MQTT IPv6 地址上报 ----
         // 常驻检测本机某网卡的全局 IPv6 地址，变化时通过 MQTT 发布到指定 topic，
         // 供外部（手机 / 服务器）获取板子的公网 IPv6 直连地址。默认关闭，零开销。
@@ -128,6 +141,7 @@ private:
 private:
     mutable std::mutex  m_mu;
     bool                m_inited = false;
+    bool                m_needsSave = false;  // Load 时完成旧配置迁移后，Init 负责一次性回写
     std::string         m_path;
     Snapshot            m_snap;     // 当前生效的配置
 };

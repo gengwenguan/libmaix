@@ -17,6 +17,7 @@
 #include "terminal.h"
 #include "liveHub.h"
 #include "appConfig.h"
+#include "httpClient.h"
 
 // ----------------------------------------------------------------------
 // 给 raw AAC 加 ADTS 头（7 字节，无 CRC）：浏览器侧 Web Audio API 在
@@ -64,11 +65,11 @@ C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight, libmaix_cam_t* ai
     :m_Wight(Wight),
     m_Hight(Hight),
     m_pNv12Buff(new unsigned char[Wight*Hight+Wight*Hight/2]),
-    // WebSocket 直播：8081（HTTP=8080 顺序），订阅 LiveHub 接收 fMP4
+    // WebSocket 直播：8081，订阅 LiveHub 接收 fMP4
     m_pWsServer(new C_WebSocketServer(this, 8081, true)),
     // WebSocket 回放：8082（保留旧文件回放路径）
     m_pWsFileServer(new C_WebSocketServer(this, 8082, false)),
-    m_pHttpServer(new C_HttpServer(8080)),
+    m_pHttpServer(new C_HttpServer(80)),
     m_pH264Enc(new C_H264Enc(this, Wight, Hight, Wight, Hight)),
     m_pAacEnc(new C_AacEnc(this)),
     m_pRecorder(new C_RollingRecorder()),
@@ -80,7 +81,7 @@ C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight, libmaix_cam_t* ai
     CLOG_INF("Terminal初始化完成\n");
     CLOG_INF("WebSocket直播端口: 8081 (fMP4 over WebSocket)\n");
     CLOG_INF("WebSocket回放端口: 8082\n");
-    CLOG_INF("HTTP服务器端口: 8080\n");
+    CLOG_INF("HTTP服务器端口: 80\n");
 
     // 录像目录：放在 <exe_dir>/record/，跟 web/ 同级，方便统一管理
     char exePath[1024] = {0};
@@ -96,6 +97,7 @@ C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight, libmaix_cam_t* ai
     m_recordDir   = exeDir + "/record";
     m_snapshotDir = exeDir + "/snapshot";
     m_promptDir   = exeDir + "/prompt";
+    m_actionsPath = exeDir + "/actions.json";
     mkdir(m_recordDir.c_str(),   0755);
     mkdir(m_snapshotDir.c_str(), 0755);
     // m_promptDir 由 CMake 在 dist/prompt/ 下生成 wav；运行时不创建，
@@ -103,13 +105,17 @@ C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight, libmaix_cam_t* ai
     CLOG_INF("录像目录: %s\n", m_recordDir.c_str());
     CLOG_INF("拍照目录: %s\n", m_snapshotDir.c_str());
 
+    // 设备动作代理配置：加载 <exeDir>/actions.json（不存在则空列表）。
+    m_pActionStore.reset(new C_ActionStore());
+    m_pActionStore->Init(m_actionsPath);
+
     // 注册 HTTP API：必须在 HttpServer Start() 之前/之后均可，路由表是独立的
     RegisterHttpApis();
 
     // ---- TLS / HTTPS / wss ----
     // 证书路径相对于 exe，由 sync.sh 推送到设备。
     // 注意：HTTP/WS 始终保留；HTTPS/WSS 只是"加一组监听端口"。
-    // 若证书加载失败，程序仍可以通过 8080 / 8081 / 8082 提供明文服务，
+    // 若证书加载失败，程序仍可以通过 80 / 8081 / 8082 提供明文服务，
     // 仅前端"讲话"按钮会因 location.protocol !== 'https:' 而隐藏。
     // 必须在 m_pHttpServer->Start() 之前 EnableTls，HttpServer 的 Start()
     // 会同时 bind/listen TLS 端口；WebSocketServer 的 AcceptThread 是循环检查
@@ -120,19 +126,16 @@ C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight, libmaix_cam_t* ai
         std::unique_ptr<C_TlsContext> tls(new C_TlsContext());
         if (tls->Init(crt, key)) {
             m_pTls = std::move(tls);
-            m_pHttpServer  ->EnableTls(8443, m_pTls.get());
+            m_pHttpServer  ->EnableTls(443, m_pTls.get());
             m_pWsServer    ->EnableTls(8444, m_pTls.get());
             m_pWsFileServer->EnableTls(8445, m_pTls.get());
-            CLOG_INF("HTTPS=8443  WSS-live=8444  WSS-playback=8445  cert=%s\n",
+            CLOG_INF("HTTPS=443  WSS-live=8444  WSS-playback=8445  cert=%s\n",
                      crt.c_str());
         } else {
             CLOG_INF("未找到 TLS 证书 (%s)，仅启用 HTTP/WS 明文模式；"
                      "讲话按钮在 HTTP 上不可用\n", crt.c_str());
         }
     }
-
-    // 启动HTTP服务器
-    m_pHttpServer->Start();
 
     // 监控形态：进程启动即开始录像，按片滚动 + 按天分目录
     // 双兜底：保留 N 天 + 总容量上限。两个阈值都由 AppConfig 提供，
@@ -174,13 +177,106 @@ C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight, libmaix_cam_t* ai
     // 始终 Start；线程内按 AppConfig.mqtt_enabled 决定是否真正采集/连网（默认关，空转）。
     m_pMqttReporter.reset(new C_MqttReporter());
     m_pMqttReporter->Start();
+
+    // ---- 日志广播器 ----
+    // 只创建对象，不启动线程、不注册 sink（禁止构造函数内发布 this）。
+    // 真正的 Start/Stop 与 sink 注册在 C_Terminal::Start()/Stop() 里完成。
+    m_pLogBroadcaster.reset(new C_LogBroadcaster());
+
+    // ---- 系统信息采集器 ----
+    // 无线程、无副作用，仅在 /api/sysinfo 被调用时读 procfs；构造即可用。
+    m_pSysInfo.reset(new C_SysInfoProvider());
+
+    // ---- 外接补光灯控制器 ----
+    // 只创建对象；线程在 C_Terminal::Start() 里拉起（析构反序在 Stop() 里停）。
+    m_pLight.reset(new C_LightController());
 }
 
 
 C_Terminal::~C_Terminal(){
+    Stop();
+}
+
+int C_Terminal::Start()
+{
+    bool expected = false;
+    if (!m_started.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return 0;
+    }
+
+    // AAC 会回调 OnOutputAac，网络服务会回调 listener；必须等 C_Terminal
+    // 完整构造后再启动，禁止构造函数内发布 this。
+    if (!m_pWsServer || m_pWsServer->Start() != 0 ||
+        !m_pWsFileServer || m_pWsFileServer->Start() != 0 ||
+        !m_pHttpServer || m_pHttpServer->Start() != 0 ||
+        !m_pAacEnc || m_pAacEnc->Start() != 0) {
+        CLOG_ERR("Terminal服务启动失败，正在回滚\n");
+        Stop();
+        return -1;
+    }
+
+    // 服务全部就绪后再启动日志广播：推送线程把日志经直播 WS 发给 /ws/log 订阅者。
+    // 此时 m_pWsServer 已 Start，回调安全。注册 sink 后，全局 CLOG_* 才开始分叉。
+    if (m_pLogBroadcaster) {
+        C_WebSocketServer* ws = m_pWsServer.get();
+        m_pLogBroadcaster->Start([ws](const char* d, size_t n) {
+            if (ws) ws->BroadcastLogText(d, n);
+        });
+        SetLogSink(m_pLogBroadcaster.get());
+    }
+
+    // 补光灯控制器：常驻线程按 AppConfig.light_* 评估点亮。始终启动，
+    // 未启用时线程空转并保证灯灭；声控模式读 AAC 采集线程发布的响度原子量。
+    if (m_pLight) m_pLight->Start();
+
+    CLOG_INF("Terminal服务已全部启动\n");
+    return 0;
+}
+
+void C_Terminal::Stop()
+{
+    m_started.store(false, std::memory_order_release);
+
+    // 最先注销日志 sink：此后 CLOG_* 不再分叉进广播队列，且 logAdapt 不再持有
+    // 广播器指针。推送线程稍后单独停。避免"WS 已停但仍被日志回调触及"。
+    SetLogSink(nullptr);
+
+    // 先停止所有外部入口并等待客户端线程退出。此时它们依赖的 TLS、编码器、
+    // Recorder、Snapshot、TalkPlayer 均仍存活。
+    if (m_pHttpServer)   m_pHttpServer->Stop();
+    if (m_pWsFileServer) m_pWsFileServer->Stop();
+    if (m_pWsServer)    m_pWsServer->Stop();
+
+    // WS 已停（不再有 BroadcastLogText 触及），此时安全 join 推送线程。
+    if (m_pLogBroadcaster) m_pLogBroadcaster->Stop();
+    {
+        std::lock_guard<std::mutex> lk(m_logFdsMutex);
+        m_logFds.clear();
+    }
+
+    // 停止最后一个会并发访问 muxer/WS 的生产者，再释放 muxer。
+    if (m_pAacEnc) m_pAacEnc->Stop();
+
+    // 补光灯：停线程前会先灭灯并释放 GPIO（见 C_LightController::Stop）。
+    // 放在 AAC 之后即可——它只读 AAC 的响度原子量，AAC 停后响度已归零。
+    if (m_pLight) m_pLight->Stop();
+
     if (m_pMqttReporter) m_pMqttReporter->Stop();
     if (m_pVmd) m_pVmd->Stop();
     if (m_pPersonDetector) m_pPersonDetector->Stop();
+    if (m_pTalkPlayer) m_pTalkPlayer->Shutdown();
+    {
+        std::lock_guard<std::mutex> lk(m_talkFdsMutex);
+        m_talkFds.clear();
+    }
+
+    if (m_pCleaner) m_pCleaner->Stop();
+    {
+        std::lock_guard<std::mutex> lk(m_muxerMutex);
+        // 析构会 flush 最后一个 fragment，Recorder 此时仍保持订阅。
+        m_pMuxer.reset();
+    }
+    if (m_pRecorder) m_pRecorder->Stop();
 }
 
 //送入采集数据
@@ -212,22 +308,23 @@ std::vector<C_PersonDetector::Box> C_Terminal::GetLatestAiBoxes(int maxAgeMs) co
     return m_pPersonDetector->GetLatestBoxes(maxAgeMs);
 }
 
-void C_Terminal::TryInitMuxer()
+std::shared_ptr<C_Fmp4Muxer> C_Terminal::GetOrCreateMuxer()
 {
-    if (m_pMuxer) return;
+    std::lock_guard<std::mutex> lk(m_muxerMutex);
+    if (m_pMuxer) return m_pMuxer;
 
     unsigned int spsPpsLen = 0;
     const unsigned char* spsPps = m_pH264Enc->GetSpsPps(&spsPpsLen);
     if (!spsPps || spsPpsLen == 0) {
         // SPS/PPS 还没准备好，等下一帧
-        return;
+        return nullptr;
     }
 
     unsigned int ascLen = 0;
     const unsigned char* asc = m_pAacEnc->GetAudioSpecificConfig(&ascLen);
     if (!asc || ascLen == 0) {
         // ASC 在 AacEnc 构造时即可生成，正常不会走到这里
-        return;
+        return nullptr;
     }
 
     C_Fmp4Muxer::VideoConfig vcfg;
@@ -242,8 +339,14 @@ void C_Terminal::TryInitMuxer()
     acfg.asc        = asc;
     acfg.ascLen     = ascLen;
 
-    m_pMuxer.reset(new C_Fmp4Muxer(this, vcfg, acfg));
+    auto muxer = std::make_shared<C_Fmp4Muxer>(this, vcfg, acfg);
+    if (!muxer->IsReady()) {
+        CLOG_ERR("fMP4 muxer 初始化失败，等待下一帧重试\n");
+        return nullptr;
+    }
+    m_pMuxer = muxer;
     CLOG_INF("fMP4 muxer 初始化完成 (sps/pps=%u, asc=%u)\n", spsPpsLen, ascLen);
+    return muxer;
 }
 
 //编码器回调的H264数据（Annex-B，可能含 SPS/PPS/IDR/P）
@@ -262,14 +365,8 @@ int C_Terminal::OnOutputH264(unsigned char* data, unsigned int dataLen,
         }
     }
 
-    // 惰性初始化 muxer：等到拿到 SPS/PPS 后再建
-    if (!m_pMuxer) {
-        TryInitMuxer();
-        if (!m_pMuxer) return 0;
-    }
-
-    // 入 muxer
-    m_pMuxer->InputH264(data, dataLen, ptsUs, isKey);
+    auto muxer = GetOrCreateMuxer();
+    if (muxer) muxer->InputH264(data, dataLen, ptsUs, isKey);
     return 0;
 }
 
@@ -287,10 +384,14 @@ int C_Terminal::OnOutputAac(unsigned char* data, unsigned int dataLen, int64_t p
         m_pWsServer->BroadcastAudioBinary(adts.data(), adts.size());
     }
 
-    // muxer 还没建好（首个 IDR 还没出来）就先丢弃 fmp4 路径，避免无视频时单独出音频
-    if (!m_pMuxer) return 0;
-
-    m_pMuxer->InputAac(data, dataLen, ptsUs);
+    // 复制 shared_ptr 后在锁外输入；即使未来支持运行时重建，本次调用期间对象
+    // 生命周期也稳定。muxer 还没建好时丢弃音频，避免先产生无视频 fragment。
+    std::shared_ptr<C_Fmp4Muxer> muxer;
+    {
+        std::lock_guard<std::mutex> lk(m_muxerMutex);
+        muxer = m_pMuxer;
+    }
+    if (muxer) muxer->InputAac(data, dataLen, ptsUs);
     return 0;
 }
 
@@ -325,6 +426,16 @@ int C_Terminal::OnWSClientDisconnect(int fd)
             m_pTalkPlayer->Shutdown();
         }
     }
+
+    // /ws/log 订阅者断开：更新计数（归 0 后广播器回到零开销空转）。
+    bool wasLog = false;
+    size_t logCnt = 0;
+    {
+        std::lock_guard<std::mutex> lk(m_logFdsMutex);
+        wasLog = m_logFds.erase(fd) > 0;
+        logCnt = m_logFds.size();
+    }
+    if (wasLog && m_pLogBroadcaster) m_pLogBroadcaster->SetClientCount((int)logCnt);
     return 0;
 }
 
@@ -378,6 +489,16 @@ void C_Terminal::OnWSClientHandshake(int fd, const std::string& urlPath)
                 CLOG_ERR("TalkPlayer InitDevice 失败：声卡可能被其它进程占用，本次讲话不可用\n");
             }
         }
+    } else if (urlPath == "/ws/log" || urlPath == "/ws/log/") {
+        // 日志订阅者接入：更新计数，广播器据此决定是否入队（0 人时零开销）。
+        size_t cnt = 0;
+        {
+            std::lock_guard<std::mutex> lk(m_logFdsMutex);
+            m_logFds.insert(fd);
+            cnt = m_logFds.size();
+        }
+        if (m_pLogBroadcaster) m_pLogBroadcaster->SetClientCount((int)cnt);
+        CLOG_INF("日志订阅客户端已连接: fd=%d (count=%zu)\n", fd, cnt);
     }
 }
 
@@ -463,7 +584,7 @@ std::string C_Terminal::get_ipv4_address() {
 // ----------------------------------------------------------------------
 // HTTP API 注册：监控录像（常驻、按天分目录）
 //
-// 全部走 8080 端口；前端通过 fetch 调用，与 8081 (live ws) 互不影响。
+// 全部走 80 端口；前端通过 fetch 调用，与 8081 (live ws) 互不影响。
 //
 //   GET  /api/record/status      -> {recording, file, bytes, root}
 //   GET  /api/record/days        -> ["20260523", "20260522", ...]   (倒序)
@@ -520,6 +641,43 @@ bool IsSafeFileName(const std::string& s) {
         if (!ok) return false;
     }
     return true;
+}
+
+// 从极简 JSON body 里抽 "key":"value"（仅字符串值，支持 \" \\ 转义）。
+// 找不到返回 false。与 /api/prompt、/api/photo/delete 的手写解析同风格，
+// 只覆盖本项目自己前端发出的扁平对象，不追求通用 JSON 兼容。
+bool ExtractJsonStr(const std::string& body, const std::string& key,
+                    std::string& out) {
+    const std::string pat = "\"" + key + "\"";
+    size_t kp = body.find(pat);
+    if (kp == std::string::npos) return false;
+    size_t colon = body.find(':', kp + pat.size());
+    if (colon == std::string::npos) return false;
+    size_t i = colon + 1;
+    while (i < body.size() &&
+           (body[i]==' '||body[i]=='\t'||body[i]=='\n'||body[i]=='\r')) ++i;
+    if (i >= body.size() || body[i] != '"') return false;
+    ++i;
+    std::string v;
+    while (i < body.size()) {
+        char c = body[i++];
+        if (c == '"') { out = v; return true; }
+        if (c == '\\' && i < body.size()) {
+            char e = body[i++];
+            switch (e) {
+                case 'n': v += '\n'; break;
+                case 'r': v += '\r'; break;
+                case 't': v += '\t'; break;
+                case '"': v += '"';  break;
+                case '\\':v += '\\'; break;
+                case '/': v += '/';  break;
+                default:  v += e;    break;
+            }
+        } else {
+            v += c;
+        }
+    }
+    return false;  // 未闭合
 }
 } // namespace
 
@@ -1002,6 +1160,75 @@ void C_Terminal::RegisterHttpApis()
             return rsp;
         });
 
+    // GET /api/netinfo  ->  设备真实网卡地址 {"ipv4":"...", "ipv6":"..."}
+    // 浏览器地址栏的 host 只是"访问入口"，不一定等于设备当前网卡地址；这里直接
+    // 从板端枚举网卡返回，供前端在实况页展示。IPv6 取配置里监测网卡的全局单播地址
+    // （复用 MqttReporter 的实现，已排除 fe80:: / ::1），拿不到时返回空串。
+    http->RegisterApi("GET", "/api/netinfo",
+        [](const C_HttpServer::ApiRequest&) -> C_HttpServer::ApiResponse {
+            C_HttpServer::ApiResponse rsp;
+            rsp.contentType = "application/json";
+            const std::string iface = C_AppConfig::GetInst().GetSnapshot().mqtt_iface;
+            std::string ipv6 = C_MqttReporter::GetGlobalIpv6(iface);
+            if (ipv6.empty() && !iface.empty()) {
+                // 监测网卡上没有全局 IPv6 时，退一步扫描所有网卡兜底
+                ipv6 = C_MqttReporter::GetGlobalIpv6("");
+            }
+            std::ostringstream js;
+            js << "{\"ipv4\":\"" << JsonEscape(C_Terminal::get_ipv4_address()) << "\""
+               << ",\"ipv6\":\"" << JsonEscape(ipv6) << "\""
+               << "}";
+            rsp.body = js.str();
+            return rsp;
+        });
+
+    // GET /api/sysinfo  ->  设备系统资源快照
+    //   { cpu:{valid,percent,cores}, load:{valid,l1,l5,l15},
+    //     mem:{valid,total_kb,avail_kb}, proc:{valid,vmrss_kb,vmdata_kb,threshold_kb},
+    //     disk:{valid,total_bytes,avail_bytes}, uptime:{valid,sec}, proc_uptime:{valid,sec} }
+    // 全部读 procfs / statvfs（只读、无副作用）。CPU% 为两次请求间的 /proc/stat 差值，
+    // 首次请求 cpu.valid=false（无历史样本）。proc.threshold_kb 回显 mem_watchdog 阈值。
+    http->RegisterApi("GET", "/api/sysinfo",
+        [this](const C_HttpServer::ApiRequest&) -> C_HttpServer::ApiResponse {
+            C_HttpServer::ApiResponse rsp;
+            rsp.contentType = "application/json";
+            if (!m_pSysInfo) {
+                rsp.status = 503;
+                rsp.body = "{\"ok\":false,\"err\":\"sysinfo unavailable\"}";
+                return rsp;
+            }
+            // mem_watchdog.sh 的 VmData 阈值：80MB = 81920KB。这里回显，供 web 显示
+            // "进程内存 / 重启阈值"，与看门狗保持一致。
+            const uint64_t kWatchdogThresholdKb = 81920;
+            // statvfs 用录像目录：它落在 eMMC 用户分区，正是关心"还能录多久"的那块。
+            C_SysInfoProvider::Info in = m_pSysInfo->Sample(m_recordDir, kWatchdogThresholdKb);
+
+            std::ostringstream js;
+            js << "{\"ok\":true"
+               << ",\"cpu\":{\"valid\":"  << (in.cpuValid ? "true":"false")
+               <<   ",\"percent\":"       << (in.cpuValid ? in.cpuPercent : 0.0)
+               <<   ",\"cores\":"         << in.cpuCores << "}"
+               << ",\"load\":{\"valid\":" << (in.loadValid ? "true":"false")
+               <<   ",\"l1\":"  << in.load1 << ",\"l5\":" << in.load5 << ",\"l15\":" << in.load15 << "}"
+               << ",\"mem\":{\"valid\":"  << (in.memValid ? "true":"false")
+               <<   ",\"total_kb\":"      << (unsigned long long)in.memTotalKb
+               <<   ",\"avail_kb\":"      << (unsigned long long)in.memAvailKb << "}"
+               << ",\"proc\":{\"valid\":" << (in.procValid ? "true":"false")
+               <<   ",\"vmrss_kb\":"      << (unsigned long long)in.procVmRssKb
+               <<   ",\"vmdata_kb\":"     << (unsigned long long)in.procVmDataKb
+               <<   ",\"threshold_kb\":"  << (unsigned long long)in.watchdogThresholdKb << "}"
+               << ",\"disk\":{\"valid\":" << (in.diskValid ? "true":"false")
+               <<   ",\"total_bytes\":"   << (unsigned long long)in.diskTotalBytes
+               <<   ",\"avail_bytes\":"   << (unsigned long long)in.diskAvailBytes << "}"
+               << ",\"uptime\":{\"valid\":" << (in.uptimeValid ? "true":"false")
+               <<   ",\"sec\":"           << (unsigned long long)in.uptimeSec << "}"
+               << ",\"proc_uptime\":{\"valid\":" << (in.procUptimeValid ? "true":"false")
+               <<   ",\"sec\":"           << (unsigned long long)in.procUptimeSec << "}"
+               << "}";
+            rsp.body = js.str();
+            return rsp;
+        });
+
     http->RegisterApi("POST", "/api/config",
         [](const C_HttpServer::ApiRequest& req) -> C_HttpServer::ApiResponse {
             C_HttpServer::ApiResponse rsp;
@@ -1071,6 +1298,147 @@ void C_Terminal::RegisterHttpApis()
             std::ostringstream os;
             os << "{\"ok\":true,\"config\":" << C_AppConfig::ToJson(newSnap) << "}";
             rsp.body = os.str();
+            return rsp;
+        });
+
+    // ==================================================================
+    // 设备动作代理（web 上可增删的"按钮→URL"，点击后由后端出站 POST）
+    //
+    //   GET  /api/actions              -> {"ok":true,"actions":[{id,name,url},...]}
+    //   POST /api/actions   body {"name":"开门","url":"http://..."}
+    //                                  -> 201 {"ok":true,"action":{id,name,url}}
+    //   POST /api/actions/delete  body {"id":".."}
+    //                                  -> {"ok":true} / 404 {"ok":false,"err":"not found"}
+    //   POST /api/actions/invoke  body {"id":".."}
+    //                                  -> {"ok":true,"status":200} 表示已成功向目标 POST
+    //                                     并收到状态行；网络失败返回 502。
+    //
+    // 仅支持 http:// 目标；配置持久化到 <exeDir>/actions.json。
+    // ==================================================================
+
+    // GET /api/actions
+    http->RegisterApi("GET", "/api/actions",
+        [this](const C_HttpServer::ApiRequest&) -> C_HttpServer::ApiResponse {
+            C_HttpServer::ApiResponse rsp;
+            rsp.contentType = "application/json";
+            std::ostringstream js;
+            js << "{\"ok\":true,\"actions\":" << m_pActionStore->ToJson() << "}";
+            rsp.body = js.str();
+            return rsp;
+        });
+
+    // POST /api/actions  ->  新增一个动作
+    http->RegisterApi("POST", "/api/actions",
+        [this](const C_HttpServer::ApiRequest& req) -> C_HttpServer::ApiResponse {
+            C_HttpServer::ApiResponse rsp;
+            rsp.contentType = "application/json";
+
+            std::string name, url;
+            ExtractJsonStr(req.body, "name", name);
+            ExtractJsonStr(req.body, "url",  url);
+
+            std::string id, err;
+            if (!m_pActionStore->Add(name, url, id, err)) {
+                rsp.status = (err == "too many actions") ? 409 : 400;
+                rsp.body = "{\"ok\":false,\"err\":\"" + JsonEscape(err) + "\"}";
+                return rsp;
+            }
+            C_ActionStore::Action a;
+            m_pActionStore->Get(id, a);
+            rsp.status = 201;
+            std::ostringstream js;
+            js << "{\"ok\":true,\"action\":{\"id\":\"" << JsonEscape(a.id)
+               << "\",\"name\":\"" << JsonEscape(a.name)
+               << "\",\"url\":\""  << JsonEscape(a.url) << "\"}}";
+            rsp.body = js.str();
+            return rsp;
+        });
+
+    // POST /api/actions/delete  body {"id":".."}
+    http->RegisterApi("POST", "/api/actions/delete",
+        [this](const C_HttpServer::ApiRequest& req) -> C_HttpServer::ApiResponse {
+            C_HttpServer::ApiResponse rsp;
+            rsp.contentType = "application/json";
+            std::string id;
+            if (!ExtractJsonStr(req.body, "id", id) || id.empty()) {
+                rsp.status = 400;
+                rsp.body = "{\"ok\":false,\"err\":\"missing id\"}";
+                return rsp;
+            }
+            if (!m_pActionStore->Remove(id)) {
+                rsp.status = 404;
+                rsp.body = "{\"ok\":false,\"err\":\"not found\"}";
+                return rsp;
+            }
+            rsp.body = "{\"ok\":true}";
+            return rsp;
+        });
+
+    // POST /api/actions/update  body {"id":"..","name":"..","url":".."}
+    // 按 id 就地更新按钮名 / 目标 URL；校验规则与新增一致。
+    http->RegisterApi("POST", "/api/actions/update",
+        [this](const C_HttpServer::ApiRequest& req) -> C_HttpServer::ApiResponse {
+            C_HttpServer::ApiResponse rsp;
+            rsp.contentType = "application/json";
+            std::string id, name, url;
+            if (!ExtractJsonStr(req.body, "id", id) || id.empty()) {
+                rsp.status = 400;
+                rsp.body = "{\"ok\":false,\"err\":\"missing id\"}";
+                return rsp;
+            }
+            ExtractJsonStr(req.body, "name", name);
+            ExtractJsonStr(req.body, "url",  url);
+
+            std::string err;
+            if (!m_pActionStore->Update(id, name, url, err)) {
+                rsp.status = (err == "not found") ? 404 : 400;
+                rsp.body = "{\"ok\":false,\"err\":\"" + JsonEscape(err) + "\"}";
+                return rsp;
+            }
+            C_ActionStore::Action a;
+            m_pActionStore->Get(id, a);
+            std::ostringstream js;
+            js << "{\"ok\":true,\"action\":{\"id\":\"" << JsonEscape(a.id)
+               << "\",\"name\":\"" << JsonEscape(a.name)
+               << "\",\"url\":\""  << JsonEscape(a.url) << "\"}}";
+            rsp.body = js.str();
+            return rsp;
+        });
+
+    // POST /api/actions/invoke  body {"id":".."}
+    // 后端到该动作的 URL 发一次出站 POST（空 body）。这是本功能的核心：
+    // 把"浏览器点按钮"代理成"camera 主动请求局域网设备"，规避浏览器跨域/混合内容限制。
+    http->RegisterApi("POST", "/api/actions/invoke",
+        [this](const C_HttpServer::ApiRequest& req) -> C_HttpServer::ApiResponse {
+            C_HttpServer::ApiResponse rsp;
+            rsp.contentType = "application/json";
+            std::string id;
+            if (!ExtractJsonStr(req.body, "id", id) || id.empty()) {
+                rsp.status = 400;
+                rsp.body = "{\"ok\":false,\"err\":\"missing id\"}";
+                return rsp;
+            }
+            C_ActionStore::Action a;
+            if (!m_pActionStore->Get(id, a)) {
+                rsp.status = 404;
+                rsp.body = "{\"ok\":false,\"err\":\"not found\"}";
+                return rsp;
+            }
+            // 出站 POST 是阻塞的（最多 5s 超时），跑在 HTTP 客户端线程里，
+            // 不影响采集/编码/直播线程。
+            HttpClient::PostResult pr = HttpClient::Post(a.url);
+            if (!pr.ok) {
+                rsp.status = 502;   // Bad Gateway：到目标设备的链路失败
+                std::ostringstream js;
+                js << "{\"ok\":false,\"err\":\"" << JsonEscape(pr.err)
+                   << "\",\"name\":\"" << JsonEscape(a.name) << "\"}";
+                rsp.body = js.str();
+                return rsp;
+            }
+            std::ostringstream js;
+            js << "{\"ok\":true,\"status\":" << pr.status
+               << ",\"name\":\"" << JsonEscape(a.name) << "\"}";
+            rsp.body = js.str();
             return rsp;
         });
 }
