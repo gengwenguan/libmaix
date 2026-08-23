@@ -13,6 +13,7 @@
 #include "aacEnc.h"
 #include "appConfig.h"
 #include "logAdapt.h"
+#include "utilTools.h"
 
 #include <algorithm>
 #include <atomic>
@@ -116,6 +117,7 @@ C_AacEnc::C_AacEnc(C_Listener* pListener)
     unsigned int rate = kSampleRate;
     err = snd_pcm_hw_params_set_rate_near(m_capture_handle, hw_params, &rate, 0);
     check_alsa_error(err, "Setting sample rate");
+    m_captureRate = rate;
     err = snd_pcm_hw_params_set_channels(m_capture_handle, hw_params, kChannels);
     check_alsa_error(err, "Setting channel count");
     unsigned long period_size = kAlsaPeriod;
@@ -159,7 +161,7 @@ C_AacEnc::C_AacEnc(C_Listener* pListener)
     m_swr = swr_alloc();
     av_opt_set_int       (m_swr, "in_channel_layout",  AV_CH_LAYOUT_MONO,  0);
     av_opt_set_int       (m_swr, "out_channel_layout", AV_CH_LAYOUT_MONO,  0);
-    av_opt_set_int       (m_swr, "in_sample_rate",     kSampleRate,        0);
+    av_opt_set_int       (m_swr, "in_sample_rate",     m_captureRate,      0);
     av_opt_set_int       (m_swr, "out_sample_rate",    kSampleRate,        0);
     av_opt_set_sample_fmt(m_swr, "in_sample_fmt",      AV_SAMPLE_FMT_S16,  0);
     av_opt_set_sample_fmt(m_swr, "out_sample_fmt",     AV_SAMPLE_FMT_FLTP, 0);
@@ -493,12 +495,20 @@ void C_AacEnc::BuildAudioSpecificConfig()
 
 void C_AacEnc::CaptureEncoder()
 {
+    m_nextPts = 0;
+    m_totalOutputSamples = 0;
+    m_latestOutputEndUs = 0;
+    m_firstPacketPts = AV_NOPTS_VALUE;
+
     std::unique_ptr<short[]> captureBuf(new short[kAlsaPeriod * kChannels]);
 
     // 用于 swr_convert 输出的临时缓冲（FLTP planar）
     uint8_t** convertedData = nullptr;
+    const int convertedCapacity = static_cast<int>(
+        av_rescale_rnd(kAlsaPeriod, kSampleRate, m_captureRate,
+                       AV_ROUND_UP)) + 32;
     if (av_samples_alloc_array_and_samples(&convertedData, nullptr,
-                                           kChannels, kAlsaPeriod,
+                                           kChannels, convertedCapacity,
                                            AV_SAMPLE_FMT_FLTP, 0) < 0) {
         CLOG_ERR("Could not alloc converted samples buffer\n");
         return;
@@ -517,6 +527,7 @@ void C_AacEnc::CaptureEncoder()
         }
 
         const int framesRead = err;
+        const int64_t captureEndUs = C_TimeBase::NowUs();
         WritePcmDump(captureBuf.get(), (unsigned int)framesRead);
 
         // 实时响度（RMS→0~100）：在滤波前的原始 PCM 上算，最贴近真实环境声。
@@ -537,12 +548,25 @@ void C_AacEnc::CaptureEncoder()
         }
 
         ApplyMicFilter(captureBuf.get(), (unsigned int)framesRead);
+        if (m_pListener && framesRead > 0) {
+            m_pListener->OnOutputPcm(
+                captureBuf.get(),
+                static_cast<unsigned int>(framesRead),
+                C_TimeBase::NowUs());
+        }
 
         // S16 → FLTP
         const uint8_t* inData[1] = { (const uint8_t*)captureBuf.get() };
-        int got = swr_convert(m_swr, convertedData, kAlsaPeriod,
+        int got = swr_convert(m_swr, convertedData, convertedCapacity,
                               inData, framesRead);
         if (got <= 0) continue;
+        const int64_t delayedInputSamples =
+            swr_get_delay(m_swr, static_cast<int64_t>(m_captureRate));
+        m_totalOutputSamples += got;
+        m_latestOutputEndUs = captureEndUs - av_rescale_q(
+            delayedInputSamples,
+            AVRational{1, static_cast<int>(m_captureRate)},
+            AVRational{1, 1000000});
 
         // 入 FIFO
         if (av_audio_fifo_write(m_fifo, (void**)convertedData, got) < got) {
@@ -602,9 +626,17 @@ void C_AacEnc::EncodeOneFrame()
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
         if (ret < 0) { PRINT_ERROR(ret); break; }
 
-        int64_t ptsUs = av_rescale_q(pkt->pts,
-                                     m_codec_ctx->time_base,
-                                     AVRational{1, 1000000});
+        if (m_firstPacketPts == AV_NOPTS_VALUE) {
+            m_firstPacketPts = pkt->pts;
+        }
+        const int64_t packetSample =
+            std::max<int64_t>(0, pkt->pts - m_firstPacketPts);
+        const int64_t samplesBehindCapture =
+            std::max<int64_t>(0, m_totalOutputSamples - packetSample);
+        const int64_t ptsUs = m_latestOutputEndUs - av_rescale_q(
+            samplesBehindCapture,
+            AVRational{1, static_cast<int>(kSampleRate)},
+            AVRational{1, 1000000});
         if (m_pDumpFile) {
             WriteAdtsAndDump(pkt->data, pkt->size);
         }

@@ -2,6 +2,11 @@
 target = "armv7-unknown-linux-musleabihf"
 
 [target.armv7-unknown-linux-musleabihf]
-linker = "/opt/toolchain-sunxi-musl/toolchain/bin/arm-openwrt-linux-muslgnueabi-gcc"
+linker = "/opt/toolchain-sunxi-musl/toolchain/bin/arm-openwrt-linux-muslgnueabi-g++"
 ar = "/opt/toolchain-sunxi-musl/toolchain/bin/arm-openwrt-linux-muslgnueabi-ar"
-rustflags = ["-C", "link-arg=-shared"]
+rustflags = [
+    "-C", "target-cpu=cortex-a7",
+    "-C", "target-feature=-crt-static",
+    "-C", "link-arg=-no-pie",
+    "-C", "link-arg=-Wl,-rpath,$ORIGIN/lib",
+]

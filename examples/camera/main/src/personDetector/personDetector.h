@@ -34,6 +34,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -69,6 +70,11 @@ public:
     // 前置条件：调用方已 SetAiCam() 注入有效 cam1（V831 ISP 顺序约束）。
     int Start(const std::string& modelDir);
 
+    // Rust host mode: keep NPU/cam1 inference native, but let the host own
+    // enable/fps/threshold policy and snapshot cooldown/dispatch.
+    void SetExternalConfig(bool enabled, float threshold, int inferFps);
+    void SetDetectionCallback(std::function<void(float)> callback);
+
     // 停止后台线程，释放模型 + cam1 资源。可重入。
     void Stop();
 
@@ -91,6 +97,13 @@ public:
     std::vector<Box> GetLatestBoxes(int maxAgeMs = 1000) const;
 
 private:
+    struct RuntimeConfig {
+        bool enabled;
+        float threshold;
+        int inferFps;
+    };
+    RuntimeConfig GetRuntimeConfig() const;
+
     void RunLoop();             // 后台线程入口
     bool DoInferOnce();         // 取 cam1 一帧 → 推理 → 解码 → 触发拍照；true=有 box
     bool DrainOnce();           // AI 关时仅消费一帧 cam1（防 vipp 堆积）
@@ -122,6 +135,11 @@ private:
     std::atomic<bool>           m_running{false};
     std::atomic<bool>           m_ready  {false};
     bool                        m_modelLoaded = false;   // 懒加载标志：仅由 RunLoop 线程读写
+    std::atomic<bool>           m_externalConfig{false};
+    std::atomic<bool>           m_externalEnabled{false};
+    std::atomic<float>          m_externalThreshold{0.6f};
+    std::atomic<int>            m_externalInferFps{5};
+    std::function<void(float)>  m_detectionCallback;
 
     // ---- 触发节流 ----
     int64_t                     m_lastTriggerMs = 0;

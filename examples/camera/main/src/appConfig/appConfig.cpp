@@ -80,11 +80,6 @@ void C_AppConfig::Init(const std::string& path)
         SaveToFile_locked();
     }
     ClampSnapshot(m_snap);
-    // 旧配置迁移完成后立刻回写版本标记，保证只放大一次；写失败不影响本次运行。
-    if (m_needsSave) {
-        SaveToFile_locked();
-        m_needsSave = false;
-    }
 }
 
 C_AppConfig::Snapshot C_AppConfig::GetSnapshot() const
@@ -123,6 +118,7 @@ std::string C_AppConfig::ToJson(const Snapshot& s)
        << ",\"ai_threshold\":"     << s.ai_threshold
        << ",\"ai_min_interval_s\":"<< s.ai_min_interval_s
        << ",\"ai_infer_fps\":"     << s.ai_infer_fps
+       << ",\"record_enabled\":"   << (s.record_enabled ? "true" : "false")
        << ",\"record_segment_s\":" << s.record_segment_s
        << ",\"record_retain_days\":" << s.record_retain_days
        << ",\"record_max_bytes\":" << s.record_max_bytes
@@ -142,7 +138,6 @@ std::string C_AppConfig::ToJson(const Snapshot& s)
        << ",\"light_start_hour\":"  << s.light_start_hour
        << ",\"light_end_hour\":"    << s.light_end_hour
        << ",\"light_sound_thresh\":"<< s.light_sound_thresh
-       << ",\"light_sound_scale_version\":" << s.light_sound_scale_version
        << ",\"light_hold_s\":"      << s.light_hold_s
        << ",\"light_gpio\":"        << s.light_gpio
        << ",\"light_active_low\":"  << (s.light_active_low ? "true" : "false")
@@ -155,6 +150,10 @@ std::string C_AppConfig::ToJson(const Snapshot& s)
        << ",\"mqtt_iface\":\""     << s.mqtt_iface << "\""
        << ",\"mqtt_report_interval_s\":" << s.mqtt_report_interval_s
        << ",\"mqtt_retain\":"      << (s.mqtt_retain ? "true" : "false")
+       << ",\"camera_hub_url\":\""        << s.camera_hub_url << "\""
+       << ",\"camera_hub_follow_board_prefix\":"
+       << (s.camera_hub_follow_board_prefix ? "true" : "false")
+       << ",\"camera_hub_device_id\":\""  << s.camera_hub_device_id << "\""
        << "}";
     return js.str();
 }
@@ -165,6 +164,7 @@ bool C_AppConfig::AssignKv(Snapshot& s, const std::string& k, const std::string&
     else if (k == "ai_threshold")       s.ai_threshold      = StrToFloat(v, s.ai_threshold);
     else if (k == "ai_min_interval_s")  s.ai_min_interval_s = StrToInt(v,  s.ai_min_interval_s);
     else if (k == "ai_infer_fps")       s.ai_infer_fps      = StrToInt(v,  s.ai_infer_fps);
+    else if (k == "record_enabled")     s.record_enabled     = StrToBool(v, s.record_enabled);
     else if (k == "record_segment_s")   s.record_segment_s  = StrToInt(v,  s.record_segment_s);
     else if (k == "record_retain_days") s.record_retain_days= StrToInt(v,  s.record_retain_days);
     else if (k == "record_max_bytes")   s.record_max_bytes  = StrToU64(v,  s.record_max_bytes);
@@ -184,7 +184,6 @@ bool C_AppConfig::AssignKv(Snapshot& s, const std::string& k, const std::string&
     else if (k == "light_start_hour")   s.light_start_hour  = StrToInt(v,  s.light_start_hour);
     else if (k == "light_end_hour")     s.light_end_hour    = StrToInt(v,  s.light_end_hour);
     else if (k == "light_sound_thresh") s.light_sound_thresh= StrToInt(v,  s.light_sound_thresh);
-    else if (k == "light_sound_scale_version") s.light_sound_scale_version = StrToInt(v, s.light_sound_scale_version);
     else if (k == "light_hold_s")       s.light_hold_s      = StrToInt(v,  s.light_hold_s);
     else if (k == "light_gpio")         s.light_gpio        = StrToInt(v,  s.light_gpio);
     else if (k == "light_active_low")   s.light_active_low  = StrToBool(v, s.light_active_low);
@@ -197,6 +196,9 @@ bool C_AppConfig::AssignKv(Snapshot& s, const std::string& k, const std::string&
     else if (k == "mqtt_iface")         s.mqtt_iface        = Trim(v);
     else if (k == "mqtt_report_interval_s") s.mqtt_report_interval_s = StrToInt(v, s.mqtt_report_interval_s);
     else if (k == "mqtt_retain")        s.mqtt_retain       = StrToBool(v, s.mqtt_retain);
+    else if (k == "camera_hub_url")            s.camera_hub_url           = Trim(v);
+    else if (k == "camera_hub_follow_board_prefix") s.camera_hub_follow_board_prefix = StrToBool(v, s.camera_hub_follow_board_prefix);
+    else if (k == "camera_hub_device_id")      s.camera_hub_device_id     = Trim(v);
     else return false;
     return true;
 }
@@ -222,7 +224,6 @@ void C_AppConfig::ClampSnapshot(Snapshot& s)
     s.light_start_hour   = Clamp(s.light_start_hour,  0,      23);
     s.light_end_hour     = Clamp(s.light_end_hour,    0,      23);
     s.light_sound_thresh = Clamp(s.light_sound_thresh,0,      100);
-    s.light_sound_scale_version = 3;  // 当前唯一合法量程版本
     s.light_hold_s       = Clamp(s.light_hold_s,      1,      3600);
     // GPIO 编号：V831 主 PIO(pio) base=0 ngpio=288，合法范围 [0,287]；越界回退默认 237(PH13)
     if (s.light_gpio < 0 || s.light_gpio > 287) s.light_gpio = 237;
@@ -231,6 +232,9 @@ void C_AppConfig::ClampSnapshot(Snapshot& s)
     // 0 = 关闭保活；非 0 时下限 60s（避免误配成几秒频繁重报），上限 24h
     if (s.mqtt_report_interval_s != 0)
         s.mqtt_report_interval_s = Clamp(s.mqtt_report_interval_s, 60, 86400);
+    if (s.camera_hub_url.size() > 512) s.camera_hub_url.resize(512);
+    if (s.camera_hub_device_id.empty()) s.camera_hub_device_id = "v831cam";
+    if (s.camera_hub_device_id.size() > 64) s.camera_hub_device_id.resize(64);
 }
 
 bool C_AppConfig::LoadFromFile_locked()
@@ -245,34 +249,11 @@ bool C_AppConfig::LoadFromFile_locked()
         CLOG_ERR("AppConfig: parse %s failed; reverting to defaults\n", m_path.c_str());
         return false;
     }
-    bool hasSoundThreshold = false;
-    bool hasSoundScaleVersion = false;
     for (const auto& p : kv) {
-        if (p.first == "light_sound_thresh") hasSoundThreshold = true;
-        if (p.first == "light_sound_scale_version") hasSoundScaleVersion = true;
         if (!AssignKv(m_snap, p.first, p.second)) {
             CLOG_INF("AppConfig: skip unknown key in %s: %s\n",
                      m_path.c_str(), p.first.c_str());
         }
-    }
-
-    // v3 在 v2 的低响度结果上再放大 5 倍，并把公开范围封顶为 100。
-    // v2 阈值乘 5；v1/无版本相对 v3 的总倍率是 50。只有配置文件确实
-    // 保存过旧阈值时才换算；没有该字段则保留当前默认值 35。
-    const int loadedScaleVersion = hasSoundScaleVersion
-        ? m_snap.light_sound_scale_version : 1;
-    if (loadedScaleVersion < 3) {
-        if (hasSoundThreshold) {
-            const int oldThresh = m_snap.light_sound_thresh;
-            const int multiplier = loadedScaleVersion < 2 ? 50 : 5;
-            const long long scaled = (long long)oldThresh * multiplier;
-            m_snap.light_sound_thresh = (int)Clamp<long long>(scaled, 0, 100);
-            CLOG_INF("AppConfig: migrate light sound threshold %d -> %d "
-                     "(scale v%d -> v3)\n",
-                     oldThresh, m_snap.light_sound_thresh, loadedScaleVersion);
-        }
-        m_snap.light_sound_scale_version = 3;
-        m_needsSave = true;
     }
     return true;
 }
@@ -290,6 +271,7 @@ bool C_AppConfig::SaveToFile_locked() const
         << "  \"ai_threshold\":       " << m_snap.ai_threshold << ",\n"
         << "  \"ai_min_interval_s\":  " << m_snap.ai_min_interval_s << ",\n"
         << "  \"ai_infer_fps\":       " << m_snap.ai_infer_fps << ",\n"
+        << "  \"record_enabled\":     " << (m_snap.record_enabled ? "true" : "false") << ",\n"
         << "  \"record_segment_s\":   " << m_snap.record_segment_s << ",\n"
         << "  \"record_retain_days\": " << m_snap.record_retain_days << ",\n"
         << "  \"record_max_bytes\":   " << m_snap.record_max_bytes << ",\n"
@@ -309,7 +291,6 @@ bool C_AppConfig::SaveToFile_locked() const
         << "  \"light_start_hour\":   " << m_snap.light_start_hour << ",\n"
         << "  \"light_end_hour\":     " << m_snap.light_end_hour << ",\n"
         << "  \"light_sound_thresh\": " << m_snap.light_sound_thresh << ",\n"
-        << "  \"light_sound_scale_version\": " << m_snap.light_sound_scale_version << ",\n"
         << "  \"light_hold_s\":       " << m_snap.light_hold_s << ",\n"
         << "  \"light_gpio\":         " << m_snap.light_gpio << ",\n"
         << "  \"light_active_low\":   " << (m_snap.light_active_low ? "true" : "false") << ",\n"
@@ -321,7 +302,11 @@ bool C_AppConfig::SaveToFile_locked() const
         << "  \"mqtt_poll_sec\":      " << m_snap.mqtt_poll_sec << ",\n"
         << "  \"mqtt_iface\":         \"" << m_snap.mqtt_iface << "\",\n"
         << "  \"mqtt_report_interval_s\": " << m_snap.mqtt_report_interval_s << ",\n"
-        << "  \"mqtt_retain\":        " << (m_snap.mqtt_retain ? "true" : "false") << "\n"
+        << "  \"mqtt_retain\":        " << (m_snap.mqtt_retain ? "true" : "false") << ",\n"
+        << "  \"camera_hub_url\":            \"" << m_snap.camera_hub_url << "\",\n"
+        << "  \"camera_hub_follow_board_prefix\": "
+        << (m_snap.camera_hub_follow_board_prefix ? "true" : "false") << ",\n"
+        << "  \"camera_hub_device_id\":      \"" << m_snap.camera_hub_device_id << "\"\n"
         << "}\n";
     ofs.close();
     return true;

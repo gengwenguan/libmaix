@@ -4,15 +4,23 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1.0", features = ["full"] }
 anyhow = "1.0"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+base64 = "0.22"
+bytes = "1.10"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 libc = "0.2"
-chrono = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha1 = "0.10"
+tokio = { version = "1.45", features = ["rt", "sync", "time"] }
+webrtc = { git = "https://github.com/gengwenguan/webrtc", rev = "a91689c3dd237ea48a0ce5a827a69d3807420a5c" }
 
 [build-dependencies]
-bindgen = "0.69.0"
+cc = "1.2"
 
-[target.armv7-unknown-linux-musleabihf.dependencies]
-
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = "s"
+panic = "abort"
+strip = "symbols"

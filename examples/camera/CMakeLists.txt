@@ -94,7 +94,7 @@ endif()
 # ----------------------------------------------------------------------
 # 拷贝内存看门狗脚本到 dist/
 #   examples/camera/mem_watchdog.sh  →  dist/mem_watchdog.sh
-# 设备端常驻运行：监控 camera VmData，超 80MB 自动重启（应对闭源库慢泄漏）。
+# 设备端常驻运行：监控 camera VmData，超 40MB 自动重启（应对闭源库慢泄漏）。
 # 开机自启需手动挂到 /etc/init.d/S02app（见 mem_watchdog.sh 顶部注释）。
 # ----------------------------------------------------------------------
 set(_wd_src "${CMAKE_CURRENT_LIST_DIR}/mem_watchdog.sh")

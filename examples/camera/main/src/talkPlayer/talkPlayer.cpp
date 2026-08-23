@@ -136,13 +136,27 @@ bool C_TalkPlayer::InitDevice()
     }
 
     // 清空可能残留的旧队列（理论上 Shutdown 已经清空过，这里防御一次）
+#ifndef CAMERA_RUST_HOST
     {
         std::lock_guard<std::mutex> qlk(m_mtx);
         m_queue.clear();
     }
+#endif
 
     m_run = true;
+#ifdef CAMERA_RUST_HOST
+    m_packet = av_packet_alloc();
+    m_frame = av_frame_alloc();
+    if (!m_packet || !m_frame) {
+        CLOG_ERR("TalkPlayer av_packet_alloc / av_frame_alloc 失败\n");
+        Shutdown_locked();
+        return false;
+    }
+    constexpr int kMaxOutSamples = 5760;
+    m_pcmBuf.resize(kMaxOutSamples * kChannels);
+#else
     m_thread = std::thread(&C_TalkPlayer::DecodePlayLoop, this);
+#endif
     CLOG_INF("TalkPlayer InitDevice 完成: 48kHz mono S16_LE\n");
     return true;
 }
@@ -156,6 +170,9 @@ void C_TalkPlayer::Shutdown()
 void C_TalkPlayer::Shutdown_locked()
 {
     // 1) 停解码线程
+#ifdef CAMERA_RUST_HOST
+    m_run.store(false);
+#else
     if (m_run.exchange(false)) {
         m_cv.notify_all();
         if (m_thread.joinable()) m_thread.join();
@@ -163,14 +180,22 @@ void C_TalkPlayer::Shutdown_locked()
         // 极少见：m_run 已经是 false 但线程对象还 joinable（构造途中失败的兜底）
         m_thread.join();
     }
+#endif
 
     // 2) 清积压队列（避免下次 Init 拿到上一次的尾巴）
+#ifndef CAMERA_RUST_HOST
     {
         std::lock_guard<std::mutex> qlk(m_mtx);
         m_queue.clear();
     }
+#endif
 
     // 3) 释放 FFmpeg / Swr
+#ifdef CAMERA_RUST_HOST
+    if (m_packet) { av_packet_free(&m_packet); }
+    if (m_frame)  { av_frame_free(&m_frame); }
+    std::vector<short>().swap(m_pcmBuf);
+#endif
     if (m_swr)    { swr_free(&m_swr); }
     if (m_decCtx) { avcodec_free_context(&m_decCtx); }
 
@@ -184,6 +209,7 @@ void C_TalkPlayer::Shutdown_locked()
     }
 }
 
+#ifndef CAMERA_RUST_HOST
 int C_TalkPlayer::FeedOpus(const unsigned char* data, unsigned int dataLen)
 {
     if (!m_run || !m_decCtx) return -2;
@@ -200,13 +226,97 @@ int C_TalkPlayer::FeedOpus(const unsigned char* data, unsigned int dataLen)
     m_cv.notify_one();
     return 0;
 }
+#endif
+
+#ifdef CAMERA_RUST_HOST
+int C_TalkPlayer::DecodePlayOpus(
+    const unsigned char* data, unsigned int dataLen)
+{
+    if (!m_run || !m_decCtx || !m_swr || !m_packet || !m_frame) return -2;
+    if (!data || dataLen == 0 || m_pcmBuf.empty()) return -1;
+
+    av_packet_unref(m_packet);
+    m_packet->data = const_cast<unsigned char*>(data);
+    m_packet->size = static_cast<int>(dataLen);
+    int ret = avcodec_send_packet(m_decCtx, m_packet);
+    if (ret < 0) {
+        PRINT_FFMPEG_ERR(ret);
+        return -1;
+    }
+
+    constexpr int kMaxOutSamples = 5760;
+    while (true) {
+        ret = avcodec_receive_frame(m_decCtx, m_frame);
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) return 0;
+        if (ret < 0) {
+            PRINT_FFMPEG_ERR(ret);
+            return -1;
+        }
+
+        uint8_t* out[1] = {
+            reinterpret_cast<uint8_t*>(m_pcmBuf.data())
+        };
+        int samples = swr_convert(
+            m_swr, out, kMaxOutSamples,
+            (const uint8_t**)m_frame->extended_data,
+            m_frame->nb_samples);
+        av_frame_unref(m_frame);
+        if (samples < 0) {
+            PRINT_FFMPEG_ERR(samples);
+            return -1;
+        }
+        if (samples > 0 &&
+            AlsaWrite(m_pcmBuf.data(), static_cast<unsigned long>(samples)) != 0) {
+            return -1;
+        }
+    }
+}
+
+int C_TalkPlayer::PlayPcmSync(const short* samples, unsigned long frames)
+{
+    if (!samples || frames == 0 || frames > 1024 * 1024) return -1;
+
+    bool expected = false;
+    if (!m_promptBusy.compare_exchange_strong(expected, true)) return -3;
+    struct BusyGuard {
+        std::atomic<bool>& flag;
+        ~BusyGuard() { flag.store(false); }
+    } busyGuard{m_promptBusy};
+
+    bool tempOpened = false;
+    {
+        std::lock_guard<std::mutex> lock(m_initMtx);
+        if (!m_pcm) {
+            if (!EnsureAlsa_locked()) return -2;
+            tempOpened = true;
+        }
+    }
+
+    const int result = AlsaWrite(samples, frames);
+    {
+        std::lock_guard<std::mutex> lock(m_pcmMtx);
+        if (m_pcm) snd_pcm_drain(m_pcm);
+    }
+
+    if (tempOpened) {
+        std::lock_guard<std::mutex> lock(m_initMtx);
+        if (!m_run.load()) CloseAlsa_locked();
+    } else {
+        std::lock_guard<std::mutex> lock(m_pcmMtx);
+        if (m_pcm) snd_pcm_prepare(m_pcm);
+    }
+    return result == 0 ? 0 : -2;
+}
+#endif
 
 void C_TalkPlayer::Reset()
 {
+#ifndef CAMERA_RUST_HOST
     {
         std::lock_guard<std::mutex> lk(m_mtx);
         m_queue.clear();
     }
+#endif
     if (m_decCtx) avcodec_flush_buffers(m_decCtx);
     {
         std::lock_guard<std::mutex> pl(m_pcmMtx);
@@ -245,6 +355,7 @@ int C_TalkPlayer::AlsaWrite(const short* buf, unsigned long frames)
     return 0;
 }
 
+#ifndef CAMERA_RUST_HOST
 void C_TalkPlayer::DecodePlayLoop()
 {
     AVPacket* pkt   = av_packet_alloc();
@@ -302,7 +413,9 @@ void C_TalkPlayer::DecodePlayLoop()
     av_packet_free(&pkt);
     av_frame_free(&frame);
 }
+#endif
 
+#ifndef CAMERA_RUST_HOST
 // ----------------------------------------------------------------------
 // 提示音播放：同步阻塞 + 复用 ALSA
 // ----------------------------------------------------------------------
@@ -468,3 +581,4 @@ int C_TalkPlayer::PlayWavSync(const std::string& path)
     }
     return 0;
 }
+#endif

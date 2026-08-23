@@ -51,7 +51,7 @@ public:
     // 停止录像（幂等）。析构时会自动 Stop。
     void Stop();
 
-    bool        IsRecording() const { return m_running.load(); }
+    bool        IsRecording() const;
     std::string CurrentFile() const;
     uint64_t    CurrentBytes() const { return m_curBytes.load(); }
     std::string RootDir()     const { return m_rootDir; }

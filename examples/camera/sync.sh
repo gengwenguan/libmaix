@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# sync.sh —— 本地 → 编译机(192.168.1.10) → 开发板(192.168.1.28)
+# sync.sh —— 本地 → 编译机 → V831 开发板
 #
 # 用法：
 #   ./sync.sh           # 仅同步源码到编译机
@@ -14,13 +14,17 @@ set -e
 
 # ---------- 配置 ----------
 BUILD_USER="root"
-BUILD_HOST="2409:8a1e:7a45:8ad0:8647:9ff:fe45:35a0"
+BUILD_HOST="${BUILD_HOST:-lecoo.gwghome.site}"
 BUILD_DIR="/root/work/libmaix/examples/camera"
 
 DEVICE_USER="root"
 DEVICE_HOST="192.168.1.13"
 DEVICE_DIR="/root/maix_dist"
 DEVICE_PASS="root"          # 开发板 ssh 密码（与 scppush.sh 保持一致）
+
+HUB_USER="${HUB_USER:-android}"
+HUB_HOST="${HUB_HOST:-mi6.gwghome.site}"
+HUB_EDGE_KEY="${HUB_EDGE_KEY:-/home/android/.ssh/camera-hub-edge-acme-rsa}"
 
 # 启动 camera 时注入的环境变量。每行一条 KEY=VALUE，留空即不注入。
 # 调试用法：
@@ -125,10 +129,10 @@ do_push_device() {
              sleep 2;
              exit 0'
 
-        echo '[sync] 2) scp 推送新二进制'
+        echo '[sync] 2) scp 更新共享目录中的 C++ 二进制'
         sshpass -p '${DEVICE_PASS}' scp -r -O \
             ${SSH_COMPAT_OPTS} \
-            dist/camera ${DEVICE_USER}@${DEVICE_HOST}:${DEVICE_DIR}
+            dist/camera ${DEVICE_USER}@${DEVICE_HOST}:${DEVICE_DIR}/camera_cpp
 
         echo '[sync] 2.1) scp 推送 web 静态资源 (dist/web → ${DEVICE_DIR}/web)'
         if [ -d dist/web ]; then
@@ -143,14 +147,12 @@ do_push_device() {
             echo '[sync] !! dist/web 不存在，跳过 web 资源推送'
         fi
 
-        echo '[sync] 2.2) scp 推送 TLS 自签证书 (dist/cert → ${DEVICE_DIR}/cert)'
-        if [ -d dist/cert ]; then
-            sshpass -p '${DEVICE_PASS}' scp -r -O \
-                ${SSH_COMPAT_OPTS} \
-                dist/cert ${DEVICE_USER}@${DEVICE_HOST}:${DEVICE_DIR}/
-        else
-            echo '[sync] !! dist/cert 不存在，跳过证书推送 (HTTPS 将启动失败)'
-        fi
+        echo '[sync] 2.2) 保留 ${DEVICE_DIR}/state/tls 权威证书，不再覆盖自签名证书'
+        sshpass -p '${DEVICE_PASS}' ssh ${SSH_COMPAT_OPTS} \
+            ${DEVICE_USER}@${DEVICE_HOST} \
+            'mkdir -p ${DEVICE_DIR}/state/tls \
+                ${DEVICE_DIR}/state/acme-webroot/.well-known/acme-challenge;
+             chmod 700 ${DEVICE_DIR}/state/tls'
 
         echo '[sync] 2.3) scp 推送内存看门狗脚本 (dist/mem_watchdog.sh)'
         if [ -f dist/mem_watchdog.sh ]; then
@@ -161,15 +163,43 @@ do_push_device() {
             echo '[sync] !! dist/mem_watchdog.sh 不存在，跳过看门狗推送'
         fi
 
-        echo '[sync] 3) 启动 camera (后台运行)'
-        # 开发板 BusyBox 既无 nohup 也无 setsid。
-        # 用子 shell + trap 屏蔽 HUP + 关闭所有继承自 ssh 的 fd 来后台启动。
+        echo '[sync] 3) 通过共享切换脚本启动 C++ 版本'
         sshpass -p '${DEVICE_PASS}' ssh \
             ${SSH_COMPAT_OPTS} \
             ${DEVICE_USER}@${DEVICE_HOST} \
-            'cd ${DEVICE_DIR} && rm -f camera.log && ( trap \"\" HUP; ${EXPORT_LINES} ./start_app.sh </dev/null >camera.log 2>&1 ) & sleep 1; exit 0'
+            'cd ${DEVICE_DIR} &&
+             test -x ./switch_camera.sh &&
+             ./switch_camera.sh cpp'
     "
+    provision_hub_edge_key
     log "推送完成，开发板已启动 camera"
+}
+
+provision_hub_edge_key() {
+    log "安装 Camera-hub ACME SSH 公钥到开发板"
+    local public_key
+    public_key=$(ssh -6 -o StrictHostKeyChecking=no \
+        "${HUB_USER}@${HUB_HOST}" \
+        "test -r '${HUB_EDGE_KEY}.pub' && cat '${HUB_EDGE_KEY}.pub'") || {
+        warn "Camera-hub ACME 公钥尚未生成，先部署 camera-hub 后再重试"
+        return 0
+    }
+    ssh -o StrictHostKeyChecking=no ${BUILD_SSH_OPT} \
+        "${BUILD_USER}@${BUILD_SSH_TARGET}" "
+        sshpass -p '${DEVICE_PASS}' ssh ${SSH_COMPAT_OPTS} \
+            ${DEVICE_USER}@${DEVICE_HOST} \
+            'mkdir -p /etc/dropbear;
+             touch /etc/dropbear/authorized_keys;
+             grep -Fqx \"${public_key}\" /etc/dropbear/authorized_keys ||
+                 echo \"${public_key}\" >> /etc/dropbear/authorized_keys;
+             chmod 600 /etc/dropbear/authorized_keys'
+    "
+    ssh -6 -o StrictHostKeyChecking=no "${HUB_USER}@${HUB_HOST}" "
+        sed -i \"s/^CAMERA_HUB_EDGE_ACME_ENABLED=.*/CAMERA_HUB_EDGE_ACME_ENABLED='true'/\" \
+            /home/android/.config/camera-hub.env
+        nohup /usr/local/bin/camera-hub-acme-edge \
+            >> /home/android/camera-hub-acme-edge.log 2>&1 &
+    "
 }
 
 # ---------- 从开发板拉文件回 Mac ----------

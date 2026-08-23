@@ -213,17 +213,32 @@ void C_RollingRecorder::OnLiveInitSegment(const uint8_t* data, size_t len)
     CLOG_INF("RollingRecorder cache init segment: %zu bytes\n", len);
 }
 
+bool C_RollingRecorder::IsRecording() const
+{
+    std::lock_guard<std::mutex> lk(m_mu);
+    return m_running.load() && m_ofs.is_open();
+}
+
 void C_RollingRecorder::OnLiveFragment(const uint8_t* data, size_t len)
 {
     if (!m_running.load() || !data || len == 0) return;
     std::lock_guard<std::mutex> lk(m_mu);
     if (!m_running.load()) return;
 
+    C_AppConfig::Snapshot config = C_AppConfig::GetInst().GetSnapshot();
+    if (!config.record_enabled) {
+        if (m_ofs.is_open()) {
+            m_ofs.flush();
+            m_ofs.close();
+            CloseIdxFile_locked();
+        }
+        return;
+    }
     int64_t now = NowMonoMs();
     // 每个 fragment 入口拉一次配置（mutex+memcpy 开销 < 1us，远低于 fragment 周期）：
     // 这样避免在类内维护副本和 setter，web 改完即时生效。
     // ClampSnapshot 已保证 record_segment_s ∈ [10, 3600]，这里无须再校验。
-    int segmentMs = C_AppConfig::GetInst().GetSnapshot().record_segment_s * 1000;
+    int segmentMs = config.record_segment_s * 1000;
     bool needRoll = !m_ofs.is_open()
                   || (now - m_segStartMs) >= segmentMs;
 

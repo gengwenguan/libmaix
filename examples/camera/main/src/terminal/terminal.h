@@ -129,8 +129,11 @@ private:
     // 移动侦测（VMD：与 AI 检测平行的轻量级触发器，纯 CPU 帧差）
     std::unique_ptr<C_MotionDetector>  m_pVmd;
 
-    // TLS 上下文（HTTPS / wss 共用），首次启动时基于 <exeDir>/cert/ 加载证书
+    // TLS 上下文（HTTPS / wss 共用），优先加载 state/tls，旧 cert/ 仅作迁移回退。
     std::unique_ptr<C_TlsContext>      m_pTls;
+
+    // Camera-hub ACME 管理器通过 SSH 同步 HTTP-01 challenge 到共享状态目录。
+    std::string                        m_acmeChallengeDir;
 
     // "讲话" 单向语音（浏览器→开发板 OPUS 播放）
     std::unique_ptr<C_TalkPlayer>      m_pTalkPlayer;

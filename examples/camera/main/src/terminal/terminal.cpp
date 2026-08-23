@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <algorithm>
+#include <cctype>
 #include <sstream>
 #include <fstream>
 #include <cstring>
@@ -98,6 +99,7 @@ C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight, libmaix_cam_t* ai
     m_snapshotDir = exeDir + "/snapshot";
     m_promptDir   = exeDir + "/prompt";
     m_actionsPath = exeDir + "/actions.json";
+    m_acmeChallengeDir = exeDir + "/state/acme-webroot/.well-known/acme-challenge";
     mkdir(m_recordDir.c_str(),   0755);
     mkdir(m_snapshotDir.c_str(), 0755);
     // m_promptDir 由 CMake 在 dist/prompt/ 下生成 wav；运行时不创建，
@@ -113,7 +115,8 @@ C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight, libmaix_cam_t* ai
     RegisterHttpApis();
 
     // ---- TLS / HTTPS / wss ----
-    // 证书路径相对于 exe，由 sync.sh 推送到设备。
+    // 权威证书由 Camera-hub ACME 管理器原子同步到共享 state/tls；
+    // 旧 cert/ 只在首次迁移尚未签发时回退使用。
     // 注意：HTTP/WS 始终保留；HTTPS/WSS 只是"加一组监听端口"。
     // 若证书加载失败，程序仍可以通过 80 / 8081 / 8082 提供明文服务，
     // 仅前端"讲话"按钮会因 location.protocol !== 'https:' 而隐藏。
@@ -121,8 +124,12 @@ C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight, libmaix_cam_t* ai
     // 会同时 bind/listen TLS 端口；WebSocketServer 的 AcceptThread 是循环检查
     // m_tlsServerFd，因此构造之后再 EnableTls 也能即时生效。
     {
-        std::string crt = exeDir + "/cert/server.crt";
-        std::string key = exeDir + "/cert/server.key";
+        std::string crt = exeDir + "/state/tls/fullchain.pem";
+        std::string key = exeDir + "/state/tls/private.key";
+        if (access(crt.c_str(), R_OK) != 0 || access(key.c_str(), R_OK) != 0) {
+            crt = exeDir + "/cert/server.crt";
+            key = exeDir + "/cert/server.key";
+        }
         std::unique_ptr<C_TlsContext> tls(new C_TlsContext());
         if (tls->Init(crt, key)) {
             m_pTls = std::move(tls);
@@ -685,12 +692,41 @@ void C_Terminal::RegisterHttpApis()
 {
     auto* http = m_pHttpServer.get();
 
+    http->RegisterApiPrefix("GET", "/.well-known/acme-challenge/",
+        [this](const C_HttpServer::ApiRequest& req) -> C_HttpServer::ApiResponse {
+            C_HttpServer::ApiResponse rsp;
+            const std::string prefix = "/.well-known/acme-challenge/";
+            const std::string token = req.path.substr(prefix.size());
+            if (token.empty() || token.size() > 256 ||
+                !std::all_of(token.begin(), token.end(), [](unsigned char c) {
+                    return std::isalnum(c) || c == '-' || c == '_';
+                })) {
+                rsp.status = 400;
+                rsp.contentType = "text/plain; charset=utf-8";
+                rsp.body = "invalid challenge token";
+                return rsp;
+            }
+            const std::string path = m_acmeChallengeDir + "/" + token;
+            struct stat st{};
+            if (stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+                rsp.status = 404;
+                rsp.contentType = "text/plain; charset=utf-8";
+                rsp.body = "challenge not found";
+                return rsp;
+            }
+            rsp.contentType = "text/plain; charset=utf-8";
+            rsp.filePath = path;
+            return rsp;
+        });
+
     // GET /api/record/status  ->  当前正在录的文件 / 字节数 / 根目录
     http->RegisterApi("GET", "/api/record/status",
         [this](const C_HttpServer::ApiRequest&) -> C_HttpServer::ApiResponse {
             C_HttpServer::ApiResponse rsp;
             std::ostringstream js;
-            js << "{\"recording\":" << (m_pRecorder->IsRecording() ? "true" : "false")
+            const auto config = C_AppConfig::GetInst().GetSnapshot();
+            js << "{\"enabled\":" << (config.record_enabled ? "true" : "false")
+               << ",\"recording\":" << (m_pRecorder->IsRecording() ? "true" : "false")
                << ",\"file\":\"" << JsonEscape(BaseName(m_pRecorder->CurrentFile())) << "\""
                << ",\"bytes\":" << m_pRecorder->CurrentBytes()
                << ",\"root\":\"" << JsonEscape(m_pRecorder->RootDir()) << "\""
@@ -1197,9 +1233,9 @@ void C_Terminal::RegisterHttpApis()
                 rsp.body = "{\"ok\":false,\"err\":\"sysinfo unavailable\"}";
                 return rsp;
             }
-            // mem_watchdog.sh 的 VmData 阈值：80MB = 81920KB。这里回显，供 web 显示
+            // mem_watchdog.sh 的 VmData 阈值：40MB = 40960KB。这里回显，供 web 显示
             // "进程内存 / 重启阈值"，与看门狗保持一致。
-            const uint64_t kWatchdogThresholdKb = 81920;
+            const uint64_t kWatchdogThresholdKb = 40960;
             // statvfs 用录像目录：它落在 eMMC 用户分区，正是关心"还能录多久"的那块。
             C_SysInfoProvider::Info in = m_pSysInfo->Sample(m_recordDir, kWatchdogThresholdKb);
 

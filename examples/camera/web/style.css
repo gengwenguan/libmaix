@@ -301,6 +301,14 @@ video { display: block; width: 100%; background: #020609; }
 .btn-toggle-live:hover { color: var(--accent-ink); background: var(--accent-strong); }
 .btn-toggle-live.live { color: #fff; background: var(--danger); }
 .btn-toggle-live.live:hover { background: #f3868c; }
+.btn-webrtc-live {
+    border-color: rgba(98, 174, 247, .45);
+    color: #dcefff;
+    background: rgba(98, 174, 247, .16);
+    font-weight: 700;
+}
+.btn-webrtc-live:hover { background: rgba(98, 174, 247, .26); }
+.btn-webrtc-live.live { border-color: transparent; color: #fff; background: var(--danger); }
 
 /* 设备动作代理卡片 */
 .card-hint {

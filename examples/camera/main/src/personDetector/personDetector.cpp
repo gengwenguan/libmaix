@@ -7,7 +7,9 @@
 **********************************************************************************/
 #include "personDetector.h"
 #include "appConfig.h"
+#ifndef CAMERA_RUST_HOST
 #include "snapshot.h"
+#endif
 #include "logAdapt.h"
 
 extern "C" {
@@ -21,6 +23,7 @@ extern "C" {
 #include <chrono>
 #include <cstring>
 #include <sys/stat.h>
+#include <utility>
 
 namespace {
 constexpr uint32_t kNetIn  = 224;
@@ -56,6 +59,32 @@ C_PersonDetector::C_PersonDetector(int width, int height)
 C_PersonDetector::~C_PersonDetector()
 {
     Stop();
+}
+
+void C_PersonDetector::SetExternalConfig(bool enabled, float threshold, int inferFps)
+{
+    m_externalEnabled.store(enabled);
+    m_externalThreshold.store(threshold);
+    m_externalInferFps.store(inferFps);
+    m_externalConfig.store(true);
+}
+
+void C_PersonDetector::SetDetectionCallback(std::function<void(float)> callback)
+{
+    m_detectionCallback = std::move(callback);
+}
+
+C_PersonDetector::RuntimeConfig C_PersonDetector::GetRuntimeConfig() const
+{
+    if (m_externalConfig.load()) {
+        return RuntimeConfig{
+            m_externalEnabled.load(),
+            m_externalThreshold.load(),
+            m_externalInferFps.load(),
+        };
+    }
+    const auto config = C_AppConfig::GetInst().GetSnapshot();
+    return RuntimeConfig{config.ai_enabled, config.ai_threshold, config.ai_infer_fps};
 }
 
 int C_PersonDetector::Start(const std::string& modelDir)
@@ -116,7 +145,7 @@ bool C_PersonDetector::LoadModel()
     // YOLOv2 decoder 配置（输入图等于网络输入，避免再缩 box 坐标）
     auto* cfg = new libmaix_nn_decoder_yolo2_config_t();
     cfg->classes_num    = kClassNum;
-    cfg->threshold      = C_AppConfig::GetInst().GetSnapshot().ai_threshold;
+    cfg->threshold      = GetRuntimeConfig().threshold;
     cfg->nms_value      = 0.5f;
     cfg->anchors_num    = kAnchorNum;
     cfg->anchors        = m_anchors.data();
@@ -207,7 +236,7 @@ void C_PersonDetector::UnloadModel()
 bool C_PersonDetector::DoInferOnce()
 {
     if (!m_aiCam) return false;
-    auto cfg = C_AppConfig::GetInst().GetSnapshot();
+    auto cfg = GetRuntimeConfig();
 
     // 1. 从 cam1 拿一帧 RGB888（driver 内部循环 buffer，地址直接复用，无拷贝）
     libmaix_err_t cerr = m_aiCam->capture_image(m_aiCam, &m_aiImage);
@@ -220,7 +249,7 @@ bool C_PersonDetector::DoInferOnce()
     // 2. 同步 threshold 到 decoder（用户在 web 上调阈值时无需重启线程）
     if (m_yoloCfg) {
         auto* yc = static_cast<libmaix_nn_decoder_yolo2_config_t*>(m_yoloCfg);
-        yc->threshold = cfg.ai_threshold;
+        yc->threshold = cfg.threshold;
     }
 
     // 3. forward —— 直接把 driver buffer 当 input.data，零拷贝
@@ -269,7 +298,7 @@ bool C_PersonDetector::DoInferOnce()
     for (uint32_t i = 0; i < result.boxes_num; ++i) {
         // class_num=1，class_id 固定 0
         float p = result.probs[i][0];
-        if (p < cfg.ai_threshold) continue;
+        if (p < cfg.threshold) continue;
         const auto& b = result.boxes[i];
         // yolo2 输出已经归一化到 [0,1]（中心点 + 宽高，相对于 input_width/height）
         hits.push_back(Box{ b.x, b.y, b.w, b.h, p });
@@ -287,22 +316,30 @@ bool C_PersonDetector::DoInferOnce()
         return false;
     }
 
+    if (m_externalConfig.load()) {
+        if (m_detectionCallback) m_detectionCallback(maxProb);
+        return true;
+    }
+
     // 5. 触发节流
+    auto appConfig = C_AppConfig::GetInst().GetSnapshot();
     int64_t now = NowMs();
-    int64_t minIntervalMs = (int64_t)cfg.ai_min_interval_s * 1000;
+    int64_t minIntervalMs = (int64_t)appConfig.ai_min_interval_s * 1000;
     if (m_lastTriggerMs != 0 && (now - m_lastTriggerMs) < minIntervalMs) {
         return true;  // 检测到了人，但还在冷却期
     }
     m_lastTriggerMs = now;
 
+#ifndef CAMERA_RUST_HOST
     if (m_pSnapshot) {
         std::string name = m_pSnapshot->TakeOne();
         CLOG_INF("personDetector: person detected (prob=%.2f thresh=%.2f), snapshot -> %s\n",
-                 maxProb, cfg.ai_threshold, name.c_str());
+                 maxProb, cfg.threshold, name.c_str());
     } else {
         CLOG_INF("personDetector: person detected (prob=%.2f) but no snapshot\n",
                  maxProb);
     }
+#endif
     return true;
 }
 
@@ -337,20 +374,28 @@ std::vector<C_PersonDetector::Box> C_PersonDetector::GetLatestBoxes(int maxAgeMs
 // --------------------------------------------------------------------
 // 后台线程：
 //   - ai_enabled=true：按 ai_infer_fps 节奏推理；间隙 sleep 让出 CPU
-//   - ai_enabled=false：以低频（~5 Hz）drain cam1 防 vipp 堆积；不加载模型
+//   - ai_enabled=false：以低频（~5 Hz）drain cam1 防 vipp 堆积；持续 5 秒后释放模型
 // --------------------------------------------------------------------
 void C_PersonDetector::RunLoop()
 {
     CLOG_INF("personDetector: thread loop start\n");
+    int64_t disabledSinceMs = 0;
     while (m_running.load()) {
-        auto cfg = C_AppConfig::GetInst().GetSnapshot();
+        auto cfg = GetRuntimeConfig();
 
-        if (!cfg.ai_enabled) {
+        if (!cfg.enabled) {
+            if (disabledSinceMs == 0) disabledSinceMs = NowMs();
+            if (m_modelLoaded && NowMs() - disabledSinceMs >= 5000) {
+                UnloadModel();
+                m_modelLoaded = false;
+                CLOG_INF("personDetector: disabled, model unloaded\n");
+            }
             // 关闭状态：仍要 drain cam1，但 5 Hz 足够（一帧 200ms 不会堆积）
             DrainOnce();
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             continue;
         }
+        disabledSinceMs = 0;
 
         // 懒加载：第一次开启时才真的把 ~12MB 模型加载进来
         if (!m_modelLoaded) {
@@ -365,7 +410,7 @@ void C_PersonDetector::RunLoop()
             CLOG_INF("personDetector: model loaded\n");
         }
 
-        int fps = cfg.ai_infer_fps;
+        int fps = cfg.inferFps;
         if (fps < 1) fps = 1;
         if (fps > 30) fps = 30;
         int periodMs = 1000 / fps;

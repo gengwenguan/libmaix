@@ -26,8 +26,10 @@
 **********************************************************************************/
 #pragma once
 #include <atomic>
+#ifndef CAMERA_RUST_HOST
 #include <condition_variable>
 #include <deque>
+#endif
 #include <memory>
 #include <mutex>
 #include <string>
@@ -48,7 +50,9 @@ private:
     static constexpr unsigned int  kSampleRate = 48000;
     static constexpr unsigned int  kChannels   = 1;
     static constexpr unsigned long kAlsaPeriod = 960;     // 20ms @ 48k
+#ifndef CAMERA_RUST_HOST
     static constexpr unsigned int  kQueueMax   = 64;      // 最多缓冲 64 帧 ≈ 1.3s
+#endif
 
 public:
     C_TalkPlayer();
@@ -68,14 +72,27 @@ public:
     // 是否处于已 Init 状态（用于上层判断要不要 FeedOpus）
     bool IsRunning() const { return m_run.load(); }
 
+#ifndef CAMERA_RUST_HOST
     // 收到一帧 OPUS（一帧 = 浏览器 AudioEncoder 一个 EncodedAudioChunk）
     // 不阻塞调用方：拷贝入队后立即返回；解码/播放在内部线程里完成。
     // 返回值：0 入队成功；-1 队列满（丢弃）；-2 未运行（被静默丢弃，调用方不必报错）
     int FeedOpus(const unsigned char* data, unsigned int dataLen);
+#endif
+
+#ifdef CAMERA_RUST_HOST
+    // Rust owns the bounded queue and worker thread. This method only decodes
+    // and plays one complete OPUS frame synchronously.
+    int DecodePlayOpus(const unsigned char* data, unsigned int dataLen);
+
+    // Rust validates and parses the WAV container. Native code only serializes
+    // access to ALSA and plays aligned 48kHz mono S16 samples.
+    int PlayPcmSync(const short* samples, unsigned long frames);
+#endif
 
     // 客户端断开时调用：清空队列 + 重置解码器/PCM 状态，避免拼到下一次会话
     void Reset();
 
+#ifndef CAMERA_RUST_HOST
     // 同步播放一段 16-bit / 48kHz / mono PCM WAV 文件（与 ALSA 输出参数一致，零转码）。
     // 与对讲共用同一 ALSA 设备：talk 在线时 prompt 写入会和 talk 解码线程通过
     // m_pcmMtx 序列化；talk 不在线时 prompt 临时打开 ALSA、播完归还。
@@ -86,9 +103,12 @@ public:
     //   -2 ALSA 不可用（独占被其它进程拿走 / hw_params 失败）
     //   -3 已有提示音在播（busy）—— HTTP 层应回 409
     int PlayWavSync(const std::string& path);
+#endif
 
 private:
+#ifndef CAMERA_RUST_HOST
     void DecodePlayLoop();
+#endif
 
     // ALSA 写入封装（处理 underrun）。AlsaWrite 自带 m_pcmMtx 锁定，
     // 调用方无需持锁。
@@ -109,11 +129,19 @@ private:
     SwrContext*       m_swr        = nullptr;     // 解码出来若是 FLTP，则转 S16
 
     std::atomic<bool> m_run{false};
+#ifndef CAMERA_RUST_HOST
     std::thread       m_thread;
 
     std::mutex                            m_mtx;     // 保护 m_queue
     std::condition_variable               m_cv;
     std::deque<std::vector<unsigned char>> m_queue;
+#endif
+
+#ifdef CAMERA_RUST_HOST
+    AVPacket*          m_packet = nullptr;
+    AVFrame*           m_frame  = nullptr;
+    std::vector<short> m_pcmBuf;
+#endif
 
     std::mutex        m_initMtx;   // 保护 InitDevice / Shutdown 串行化
     std::mutex        m_pcmMtx;    // 序列化对 m_pcm 的并发写入（talk vs prompt）

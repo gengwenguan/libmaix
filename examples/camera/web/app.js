@@ -194,6 +194,7 @@
     const stat    = document.getElementById('stat');
     const logBox  = document.getElementById('log');
     const btnLive = document.getElementById('btnLive');
+    const btnRtc  = document.getElementById('btnWebRtc');
     const btnUn   = document.getElementById('btnUnmute');
     const recDot  = document.getElementById('recDot');
     const recStat = document.getElementById('recStat');
@@ -502,9 +503,12 @@
         const isLive = liveWanted;
         btnLive.textContent = isLive ? '停止直播' : '开始直播';
         btnLive.classList.toggle('live', isLive);
+        btnRtc.textContent = rtcWanted ? '停止低延时直播' : '低延时 WebRTC';
+        btnRtc.classList.toggle('live', rtcWanted);
+        btnRtc.disabled = !rtcWanted && typeof RTCPeerConnection !== 'function';
         // 未在看时，若 MSE 不可用则禁用；在看时可随时点停止。
         btnLive.disabled = !isLive && !MediaSourceCtor;
-        btnUn.disabled = !MediaSourceCtor;
+        btnUn.disabled = !rtcWanted && !MediaSourceCtor;
     }
 
     const MIME = 'video/mp4; codecs="avc1.4d001f, mp4a.40.2"';
@@ -734,6 +738,11 @@
     }
 
     function startLive() {
+        if (rtcWanted) return;
+        if (v.srcObject) {
+            try { v.srcObject.getTracks().forEach(track => track.stop()); } catch(e) {}
+            v.srcObject = null;
+        }
         if (ws) { log('已经在连接中'); return; }
         if (!MediaSourceCtor) {
             liveWanted = false;
@@ -847,14 +856,167 @@
         teardownLive('已停止');
         syncLiveControls();
     }
-    btnLive.onclick = () => {
+    btnLive.onclick = async () => {
+        if (rtcWanted) await stopWebRtc(false);
         if (liveWanted) { liveWanted = false; stopLive(); }
         else { liveWanted = true; startLive(); syncLiveControls(); }
     };
 
+    // ============================================================
+    // 公网 IPv6 / 局域网直连 WebRTC（浏览器仅接收）
+    // ============================================================
+    let rtcPc = null;
+    let rtcWanted = false;
+    let rtcStartSeq = 0;
+    let rtcDisconnectTimer = null;
+
+    function waitIceGatheringComplete(pc, timeoutMs) {
+        if (pc.iceGatheringState === 'complete') return Promise.resolve();
+        return new Promise(resolve => {
+            let done = false;
+            const finish = () => {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                pc.removeEventListener('icegatheringstatechange', onChange);
+                resolve();
+            };
+            const onChange = () => {
+                if (pc.iceGatheringState === 'complete') finish();
+            };
+            const timer = setTimeout(finish, timeoutMs || 3500);
+            pc.addEventListener('icegatheringstatechange', onChange);
+        });
+    }
+
+    async function stopWebRtc(updateStatus) {
+        rtcWanted = false;
+        ++rtcStartSeq;
+        if (rtcDisconnectTimer) {
+            clearTimeout(rtcDisconnectTimer);
+            rtcDisconnectTimer = null;
+        }
+        const pc = rtcPc;
+        rtcPc = null;
+        if (pc) {
+            try { pc.ontrack = pc.onconnectionstatechange = null; } catch(e) {}
+            try { pc.close(); } catch(e) {}
+        }
+        try {
+            await fetch('/api/webrtc/session', {
+                method: 'DELETE',
+                cache: 'no-store',
+                keepalive: true
+            });
+        } catch(e) {}
+        if (v.srcObject) {
+            try { v.srcObject.getTracks().forEach(track => track.stop()); } catch(e) {}
+            v.srcObject = null;
+            try { v.load(); } catch(e) {}
+        }
+        if (updateStatus !== false) setStat('低延时直播已停止');
+        syncLiveControls();
+    }
+
+    function fallbackToMse(reason) {
+        if (!rtcWanted) return;
+        showToast(reason + '，已切回兼容直播', 'error');
+        stopWebRtc(false).finally(() => {
+            liveWanted = true;
+            startLive();
+            syncLiveControls();
+        });
+    }
+
+    async function exchangeWebRtcOffer(sdp) {
+        const response = await fetch('/api/webrtc/offer', {
+            method: 'POST',
+            cache: 'no-store',
+            headers: { 'Content-Type': 'application/sdp' },
+            body: sdp
+        });
+        if (!response.ok) {
+            throw new Error((await response.text()) || `HTTP ${response.status}`);
+        }
+        return response.text();
+    }
+
+    async function startWebRtc() {
+        if (rtcWanted || typeof RTCPeerConnection !== 'function') return;
+        rtcWanted = true;
+        const seq = ++rtcStartSeq;
+        if (liveWanted || ws || ms) {
+            liveWanted = false;
+            stopLive();
+        }
+        setStat('正在创建低延时连接…', 'busy');
+        syncLiveControls();
+
+        const pc = new RTCPeerConnection({
+            iceCandidatePoolSize: 0,
+            bundlePolicy: 'max-bundle',
+            rtcpMuxPolicy: 'require'
+        });
+        rtcPc = pc;
+        const stream = new MediaStream();
+        v.srcObject = stream;
+        pc.addTransceiver('video', { direction: 'recvonly' });
+        pc.addTransceiver('audio', { direction: 'recvonly' });
+        pc.ontrack = event => {
+            if (seq !== rtcStartSeq || pc !== rtcPc) return;
+            if (!stream.getTracks().some(track => track.id === event.track.id)) {
+                stream.addTrack(event.track);
+            }
+            v.play().catch(() => setStat('画面已连接，请点击播放'));
+        };
+        pc.onconnectionstatechange = () => {
+            if (seq !== rtcStartSeq || pc !== rtcPc) return;
+            const state = pc.connectionState;
+            log('WebRTC connectionState=' + state);
+            if (state === 'connected') {
+                if (rtcDisconnectTimer) clearTimeout(rtcDisconnectTimer);
+                rtcDisconnectTimer = null;
+                setStat('WebRTC 低延时播放中', 'playing');
+                setChip(deviceChip, location.hostname || '设备在线', 'online');
+            } else if (state === 'connecting' || state === 'new') {
+                setStat('WebRTC ICE/DTLS 连接中…', 'busy');
+            } else if (state === 'disconnected') {
+                setStat('WebRTC 暂时断开，等待恢复…', 'busy');
+                if (!rtcDisconnectTimer) {
+                    rtcDisconnectTimer = setTimeout(
+                        () => fallbackToMse('WebRTC 连接中断'), 5000);
+                }
+            } else if (state === 'failed') {
+                fallbackToMse('WebRTC 连接失败');
+            }
+        };
+
+        try {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            setStat('正在收集公网 IPv6 候选…', 'busy');
+            await waitIceGatheringComplete(pc, 3500);
+            if (seq !== rtcStartSeq || !rtcWanted) return;
+            const answer = await exchangeWebRtcOffer(pc.localDescription.sdp);
+            await pc.setRemoteDescription({ type: 'answer', sdp: answer });
+            setStat('WebRTC ICE/DTLS 连接中…', 'busy');
+        } catch (error) {
+            log('WebRTC negotiation failed: ' + error.message);
+            fallbackToMse('低延时协商失败');
+        }
+    }
+
+    btnRtc.onclick = async () => {
+        if (rtcWanted) await stopWebRtc(true);
+        else await startWebRtc();
+    };
+    window.addEventListener('pagehide', () => {
+        if (rtcWanted) stopWebRtc(false);
+    });
+
     // 浏览器后台或切到其它功能页时主动释放 MSE/WebSocket，回到实况后自动重建。
     function syncLiveVisibility(reason) {
-        const shouldRun = liveWanted && !document.hidden && curTab === 'live';
+        const shouldRun = !rtcWanted && liveWanted && !document.hidden && curTab === 'live';
         if (shouldRun) {
             if (!ws && !reconnectTimer) startLive();
             else if (reason !== 'initial') liveCatchUpToTail(reason);
@@ -904,7 +1066,7 @@
     syncMuteBtn();
     v.addEventListener('waiting', () => setStat('缓冲中…'));
     v.addEventListener('playing', () => {
-        setStat('播放中');
+        setStat(rtcWanted ? 'WebRTC 低延时播放中' : '播放中');
         reconnectAttempt = 0;
         lastVideoTime = v.currentTime;
         lastVideoProgressAt = Date.now();
@@ -1304,7 +1466,10 @@
         }
         setChip(deviceChip, location.hostname || '设备在线', 'online');
         const s = r.data || {};
-        if (s.recording) {
+        if (s.enabled === false) {
+            recDot.classList.remove('on');
+            recStat.textContent = '本地录像已关闭';
+        } else if (s.recording) {
             recDot.classList.add('on');
             recStat.textContent = `录像中 · ${s.file || ''} · ${fmtSize(s.bytes||0)}`;
         } else {
@@ -3120,7 +3285,7 @@
         'cfg_ai_min_interval_s', 'cfg_ai_infer_fps',
         'cfg_vmd_enabled', 'cfg_vmd_pixel_thresh', 'cfg_vmd_area_ratio',
         'cfg_vmd_min_interval_s', 'cfg_vmd_check_fps',
-        'cfg_record_segment_s', 'cfg_record_retain_days', 'cfg_record_max_gb',
+        'cfg_record_enabled', 'cfg_record_segment_s', 'cfg_record_retain_days', 'cfg_record_max_gb',
         'cfg_album_max_photos', 'cfg_photo_jpeg_qual', 'cfg_mic_filter_mode',
         'cfg_osd_show_ip', 'cfg_osd_show_time', 'cfg_osd_show_ai_box',
         'cfg_light_enabled', 'cfg_light_mode', 'cfg_light_start_hour',
@@ -3128,7 +3293,8 @@
         'cfg_light_gpio', 'cfg_light_active_low',
         'cfg_mqtt_enabled', 'cfg_mqtt_broker_host', 'cfg_mqtt_broker_port',
         'cfg_mqtt_topic', 'cfg_mqtt_client_id', 'cfg_mqtt_poll_sec', 'cfg_mqtt_iface',
-        'cfg_mqtt_report_interval_s', 'cfg_mqtt_retain'
+        'cfg_mqtt_report_interval_s', 'cfg_mqtt_retain',
+        'cfg_camera_hub_url', 'cfg_camera_hub_follow_board_prefix', 'cfg_camera_hub_device_id'
     ];
     const cfgStat = () => document.getElementById('cfgStat');
     const cfgSave = () => document.getElementById('cfgSave');
@@ -3147,6 +3313,7 @@
             loadConfig();
         });
         cfgSave().addEventListener('click', saveConfig);
+        document.getElementById('cameraHubRefresh').addEventListener('click', refreshCameraHubStatus);
         panes.settings.addEventListener('input', () => {
             if (cfgDirty) return;
             cfgDirty = true;
@@ -3167,9 +3334,10 @@
         cfgEl.cfg_ai_infer_fps.value         = c.ai_infer_fps;
         cfgEl.cfg_vmd_enabled.checked        = !!c.vmd_enabled;
         cfgEl.cfg_vmd_pixel_thresh.value     = (c.vmd_pixel_thresh   !== undefined) ? c.vmd_pixel_thresh   : 25;
-        cfgEl.cfg_vmd_area_ratio.value       = (c.vmd_area_ratio     !== undefined) ? c.vmd_area_ratio     : 0.02;
+        cfgEl.cfg_vmd_area_ratio.value       = (c.vmd_area_ratio     !== undefined) ? c.vmd_area_ratio     : 0.021;
         cfgEl.cfg_vmd_min_interval_s.value   = (c.vmd_min_interval_s !== undefined) ? c.vmd_min_interval_s : 2;
         cfgEl.cfg_vmd_check_fps.value        = (c.vmd_check_fps      !== undefined) ? c.vmd_check_fps      : 5;
+        cfgEl.cfg_record_enabled.checked     = (c.record_enabled !== undefined) ? !!c.record_enabled : true;
         cfgEl.cfg_record_segment_s.value     = c.record_segment_s;
         cfgEl.cfg_record_retain_days.value   = c.record_retain_days;
         // 后端是 byte，UI 展示 GB（向上取整到整 GB；不足 1GB 显 1）
@@ -3177,27 +3345,31 @@
         cfgEl.cfg_record_max_gb.value        = gb;
         cfgEl.cfg_album_max_photos.value     = c.album_max_photos;
         cfgEl.cfg_photo_jpeg_qual.value      = c.photo_jpeg_qual;
-        cfgEl.cfg_mic_filter_mode.value      = (c.mic_filter_mode !== undefined) ? c.mic_filter_mode : 0;
+        cfgEl.cfg_mic_filter_mode.value      = (c.mic_filter_mode !== undefined) ? c.mic_filter_mode : 5;
         cfgEl.cfg_osd_show_ip.checked        = !!c.osd_show_ip;
         cfgEl.cfg_osd_show_time.checked      = !!c.osd_show_time;
         cfgEl.cfg_osd_show_ai_box.checked    = (c.osd_show_ai_box !== undefined) ? !!c.osd_show_ai_box : true;
-        cfgEl.cfg_light_enabled.checked      = !!c.light_enabled;
-        cfgEl.cfg_light_mode.value           = (c.light_mode         !== undefined) ? c.light_mode         : 0;
+        cfgEl.cfg_light_enabled.checked      = (c.light_enabled !== undefined) ? !!c.light_enabled : true;
+        cfgEl.cfg_light_mode.value           = (c.light_mode         !== undefined) ? c.light_mode         : 1;
         cfgEl.cfg_light_start_hour.value     = (c.light_start_hour   !== undefined) ? c.light_start_hour   : 18;
         cfgEl.cfg_light_end_hour.value       = (c.light_end_hour     !== undefined) ? c.light_end_hour     : 6;
         cfgEl.cfg_light_sound_thresh.value   = (c.light_sound_thresh !== undefined) ? c.light_sound_thresh : 35;
         cfgEl.cfg_light_hold_s.value         = (c.light_hold_s       !== undefined) ? c.light_hold_s       : 30;
         cfgEl.cfg_light_gpio.value           = (c.light_gpio         !== undefined) ? c.light_gpio         : 237;
         cfgEl.cfg_light_active_low.checked   = (c.light_active_low   !== undefined) ? !!c.light_active_low : false;
-        cfgEl.cfg_mqtt_enabled.checked       = !!c.mqtt_enabled;
+        cfgEl.cfg_mqtt_enabled.checked       = (c.mqtt_enabled !== undefined) ? !!c.mqtt_enabled : true;
         cfgEl.cfg_mqtt_broker_host.value     = (c.mqtt_broker_host !== undefined) ? c.mqtt_broker_host : 'broker.emqx.io';
         cfgEl.cfg_mqtt_broker_port.value     = (c.mqtt_broker_port !== undefined) ? c.mqtt_broker_port : 1883;
-        cfgEl.cfg_mqtt_topic.value           = (c.mqtt_topic       !== undefined) ? c.mqtt_topic       : 'cam/ipv6';
+        cfgEl.cfg_mqtt_topic.value           = (c.mqtt_topic       !== undefined) ? c.mqtt_topic       : 'geng-cam-ipv6';
         cfgEl.cfg_mqtt_client_id.value       = (c.mqtt_client_id   !== undefined) ? c.mqtt_client_id   : 'v831cam';
         cfgEl.cfg_mqtt_poll_sec.value        = (c.mqtt_poll_sec    !== undefined) ? c.mqtt_poll_sec    : 10;
         cfgEl.cfg_mqtt_iface.value           = (c.mqtt_iface       !== undefined) ? c.mqtt_iface       : 'wlan0';
         cfgEl.cfg_mqtt_report_interval_s.value = (c.mqtt_report_interval_s !== undefined) ? c.mqtt_report_interval_s : 3600;
         cfgEl.cfg_mqtt_retain.checked        = (c.mqtt_retain !== undefined) ? !!c.mqtt_retain : true;
+        cfgEl.cfg_camera_hub_url.value              = c.camera_hub_url || '';
+        cfgEl.cfg_camera_hub_follow_board_prefix.checked =
+            (c.camera_hub_follow_board_prefix !== undefined) ? !!c.camera_hub_follow_board_prefix : false;
+        cfgEl.cfg_camera_hub_device_id.value        = c.camera_hub_device_id || 'v831cam';
         cfgDirty = false;
     }
 
@@ -3213,6 +3385,7 @@
         try {
             fillForm(r.data);
             setConfigStatus('设置已同步', 'playing');
+            refreshCameraHubStatus();
         } catch (e) {
             setConfigStatus('解析失败：' + e.message, 'error');
         }
@@ -3236,6 +3409,7 @@
             vmd_area_ratio:     parseFloat(cfgEl.cfg_vmd_area_ratio.value),
             vmd_min_interval_s: parseInt(cfgEl.cfg_vmd_min_interval_s.value, 10),
             vmd_check_fps:      parseInt(cfgEl.cfg_vmd_check_fps.value, 10),
+            record_enabled:     cfgEl.cfg_record_enabled.checked,
             record_segment_s:   parseInt(cfgEl.cfg_record_segment_s.value, 10),
             record_retain_days: parseInt(cfgEl.cfg_record_retain_days.value, 10),
             record_max_bytes:   gb * 1024 * 1024 * 1024,
@@ -3262,6 +3436,9 @@
             mqtt_iface:         cfgEl.cfg_mqtt_iface.value.trim(),
             mqtt_report_interval_s: parseInt(cfgEl.cfg_mqtt_report_interval_s.value, 10),
             mqtt_retain:        cfgEl.cfg_mqtt_retain.checked,
+            camera_hub_url:            cfgEl.cfg_camera_hub_url.value.trim(),
+            camera_hub_follow_board_prefix: cfgEl.cfg_camera_hub_follow_board_prefix.checked,
+            camera_hub_device_id:      cfgEl.cfg_camera_hub_device_id.value.trim(),
         };
         if (Object.keys(payload).some(k =>
             typeof payload[k] === 'number' && !Number.isFinite(payload[k]))) {
@@ -3286,6 +3463,31 @@
             setConfigStatus('设置已保存', 'playing');
         }
         showToast('设置已保存');
+        refreshCameraHubStatus();
+    }
+
+    async function refreshCameraHubStatus() {
+        const chip = document.getElementById('cameraHubConnStat');
+        const detail = document.getElementById('cameraHubResolvedUrl');
+        setChip(chip, '检测中', 'busy');
+        const r = await api('GET', '/api/camera-hub/status');
+        if (!r.ok) {
+            setChip(chip, '状态不可用', 'error');
+            return;
+        }
+        const s = r.data || {};
+        if (!s.enabled) {
+            setChip(chip, '未启用', 'idle');
+        } else if (s.connected) {
+            setChip(chip, '已连接', 'playing');
+        } else {
+            setChip(chip, '连接失败', 'error');
+        }
+        const dropped = Number(s.dropped_frames || 0);
+        detail.textContent = `实际连接：${s.resolved_url || '未解析'}；` +
+            `已上传 ${s.uploaded_frames || 0} 帧，丢弃 ${dropped} 帧` +
+            `；已回传 ${s.synced_photos || 0} 张 AI 图片` +
+            (s.last_error ? `；最近错误：${s.last_error}` : '');
     }
 
 })();

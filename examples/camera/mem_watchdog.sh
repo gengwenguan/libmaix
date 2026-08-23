@@ -21,7 +21,7 @@ START_APP="$DIST_DIR/start_app.sh"
 LOG="$DIST_DIR/watchdog.log"
 
 # ---------- 可调参数 ----------
-THRESHOLD_KB=81920        # VmData 阈值：80MB（健康基线~18MB，危险区~140MB）
+THRESHOLD_KB=40960        # VmData 阈值：40MB（健康基线~18MB，危险区~140MB）
 CHECK_INTERVAL=60         # 检查周期（秒）
 DRAIN_WAIT=2              # 杀进程后额外等待，让内核异步回收 cedar/video/disp/snd 的 fd
 LOG_MAX_LINES=20000       # 日志硬封顶：超过就裁掉前半，防止无界增长撑爆磁盘

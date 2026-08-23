@@ -48,6 +48,15 @@ public:
         // ptsUs 为该帧首样本的时间戳，单位微秒
         virtual int OnOutputAac(unsigned char* data, unsigned int dataLen,
                                 int64_t ptsUs) = 0;
+        // 滤波后的 48kHz mono S16 PCM。默认忽略，Rust host 用于按需编码
+        // WebRTC Opus；调用期间仅同步借用 samples。
+        virtual int OnOutputPcm(const int16_t* samples, unsigned int frames,
+                                int64_t ptsUs) {
+            (void)samples;
+            (void)frames;
+            (void)ptsUs;
+            return 0;
+        }
     };
     struct Biquad {
         double b0 = 1.0, b1 = 0.0, b2 = 0.0;
@@ -88,7 +97,11 @@ private:
     AVCodecContext*   m_codec_ctx      = nullptr;
     SwrContext*       m_swr            = nullptr;
     AVAudioFifo*      m_fifo           = nullptr;
+    unsigned int      m_captureRate    = kSampleRate;
     int64_t           m_nextPts        = 0;     // 单位 sample 数
+    int64_t           m_totalOutputSamples = 0;
+    int64_t           m_latestOutputEndUs = 0;
+    int64_t           m_firstPacketPts = AV_NOPTS_VALUE;
 
     unsigned char     m_asc[2]         = {0};   // AudioSpecificConfig
     unsigned int      m_ascLen         = 0;

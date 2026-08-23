@@ -40,11 +40,12 @@ public:
     struct Snapshot {
         // ---- AI 检测（人形识别 → 自动拍照）----
         bool   ai_enabled        = false;   // 默认关闭，需用户在 web 上显式打开
-        float  ai_threshold      = 0.6f;    // YOLO confidence 阈值（0.30~0.90），与 maixhub person_int8 推荐一致
-        int    ai_min_interval_s = 5;       // 同一只人 N 秒内只触发一次
-        int    ai_infer_fps      = 5;       // NPU 推理帧率（1~10）
+        float  ai_threshold      = 0.5f;    // 当前实机调优阈值
+        int    ai_min_interval_s = 3;       // 同一只人 N 秒内只触发一次
+        int    ai_infer_fps      = 1;       // 默认低频推理，降低内存/功耗压力
 
         // ---- 录像 ----
+        bool     record_enabled     = true;                        // 是否写入开发板本地录像
         int      record_segment_s   = 600;                       // 单片时长（秒）
         int      record_retain_days = 7;                          // 保留天数
         uint64_t record_max_bytes   = 16ull * 1024 * 1024 * 1024; // 总容量上限
@@ -55,7 +56,7 @@ public:
 
         // ---- 麦克风滤波 ----
         // 0=关闭；1=均衡推荐；2=激进；3=精细；4=极激进；5=均衡+噪声门
-        int    mic_filter_mode = 0;
+        int    mic_filter_mode = 5;
 
         // ---- 移动侦测（VMD：与 AI 检测平行的轻量级触发器）----
         // 原理：把 NV21 的 Y 平面下采样到 80×60，与上一参考帧做差，
@@ -63,7 +64,7 @@ public:
         // 触发：命中后调 Snapshot::TakeOne()；与 AI 检测互不干扰，可单独/同时启用。
         bool   vmd_enabled        = false;  // 默认关闭
         int    vmd_pixel_thresh   = 25;     // 单像素差阈值（0~255 luma）；越大越不敏感
-        float  vmd_area_ratio     = 0.02f;  // 面积占比阈值（0~1）：0.02 = 2% 像素发生变化才认定为移动
+        float  vmd_area_ratio     = 0.021f; // 实机调优面积阈值 2.1%
         int    vmd_min_interval_s = 2;      // 同一时段最短重复拍照间隔（秒）；按用户要求默认 2s
         int    vmd_check_fps      = 5;      // 每秒做几次差分判定（1~30）；越高越费 CPU 但响应快
 
@@ -74,24 +75,22 @@ public:
 
         // ---- 外接补光灯（GPIO 开关，默认 PH13=237）----
         // 由 lightController 常驻线程按北京时间（UTC+8）+ 麦克风响度评估是否点亮。
-        bool   light_enabled     = false;  // 总开关，默认关（关时确保灯灭并空转）
-        int    light_mode        = 0;      // 0=时段内常亮；1=时段内声控触发
+        bool   light_enabled     = true;   // 默认启用实机补光灯策略
+        int    light_mode        = 1;      // 0=时段内常亮；1=时段内声控触发
         int    light_start_hour  = 18;     // 点亮时段起始小时[0,23]；start==end 视为全天
         int    light_end_hour    = 6;      // 点亮时段结束小时[0,23]；支持跨零点（18->6=傍晚到清晨）
         int    light_sound_thresh= 35;     // 声控模式：麦克风响度阈值[0,100]，>=触发
-        // 响度量程版本：1/缺失=原始 0~100；2=0~1000；3=低响度再放大 5 倍并封顶 100。
-        int    light_sound_scale_version = 3;
         int    light_hold_s      = 30;     // 声控模式：触发后持续点亮秒数[1,3600]
         int    light_gpio        = 237;    // 控制脚 sysfs 编号（PH13=237；换脚免改代码）
         bool   light_active_low  = false;  // true=低电平点亮（兼容部分灯板）
 
         // ---- MQTT IPv6 地址上报 ----
         // 常驻检测本机某网卡的全局 IPv6 地址，变化时通过 MQTT 发布到指定 topic，
-        // 供外部（手机 / 服务器）获取板子的公网 IPv6 直连地址。默认关闭，零开销。
-        bool        mqtt_enabled     = false;             // 总开关，默认关
+        // 供外部（手机 / 服务器）获取板子的公网 IPv6 直连地址。
+        bool        mqtt_enabled     = true;              // 默认启用公网 IPv6 上报
         std::string mqtt_broker_host = "broker.emqx.io";  // broker 地址（域名或 IP）
         int         mqtt_broker_port = 1883;              // 明文 MQTT 端口
-        std::string mqtt_topic       = "cam/ipv6";        // 发布主题
+        std::string mqtt_topic       = "geng-cam-ipv6";   // 发布主题
         std::string mqtt_client_id   = "v831cam";         // 客户端 ID（多设备需区分时改）
         int         mqtt_poll_sec    = 10;                // IPv6 轮询周期（秒）
         std::string mqtt_iface       = "wlan0";           // 监测的网卡名
@@ -101,6 +100,12 @@ public:
         // 是否让 broker 保留消息（retain）：新订阅者一连上即收到最后一次上报的地址。
         // 对"当前 IPv6"这类状态语义很合适，默认开启。
         bool        mqtt_retain      = true;
+
+        // ---- camera-hub 远端连接：URL 非空即上传 ----
+        std::string camera_hub_url = "http://mi6.gwghome.site";
+        // 运营商更换 /64 前缀时，用开发板当前前 64 位替换 camera-hub 地址前缀。
+        bool        camera_hub_follow_board_prefix = false;
+        std::string camera_hub_device_id = "v831cam";
     };
 
 public:
@@ -141,7 +146,6 @@ private:
 private:
     mutable std::mutex  m_mu;
     bool                m_inited = false;
-    bool                m_needsSave = false;  // Load 时完成旧配置迁移后，Init 负责一次性回写
     std::string         m_path;
     Snapshot            m_snap;     // 当前生效的配置
 };

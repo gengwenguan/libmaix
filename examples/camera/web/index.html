@@ -58,6 +58,7 @@
                         <div class="card action-card">
                             <p class="card-label">直播控制</p>
                             <div class="live-actions">
+                                <button id="btnWebRtc" class="btn-webrtc-live">低延时 WebRTC</button>
                                 <button id="btnLive" class="btn-toggle-live">开始直播</button>
                                 <button id="btnSnap">立即拍照</button>
                                 <button id="btnUnmute">开启声音</button>
@@ -166,7 +167,7 @@
                 <div id="devLog"></div>
             </details>
             <div class="hint-box">
-                监控录像默认常驻：进程启动即开始录像，按 10 分钟分片并按天分目录（<code>record/YYYYMMDD/...</code>），
+                开启本地录像后按设置时长分片并按天分目录（<code>record/YYYYMMDD/...</code>），
                 到期自动清理（保留 7 天 + 容量上限双兜底），无需手动 start/stop。
             </div>
         </section>
@@ -304,7 +305,7 @@
                     <label>面积占比阈值
                         <input type="number" id="cfg_vmd_area_ratio" step="0.005" min="0.001" max="0.5">
                     </label>
-                    <span class="hint-inline">变化像素占画面比例 &gt; 此值才触发；0.02 = 2%</span>
+                    <span class="hint-inline">变化像素占画面比例 &gt; 此值才触发；默认 0.021 = 2.1%</span>
                 </div>
                 <div class="cfg-row">
                     <label>最短拍照间隔(秒)
@@ -326,6 +327,10 @@
 
             <fieldset class="cfg-section">
                 <legend>录像</legend>
+                <div class="cfg-row">
+                    <label class="toggle-label"><input type="checkbox" id="cfg_record_enabled"> 开启开发板本地录像</label>
+                    <span class="hint-inline">关闭后停止写入新录像，不影响直播和已有文件</span>
+                </div>
                 <div class="cfg-row">
                     <label>分片时长(秒)
                         <input type="number" id="cfg_record_segment_s" step="1" min="10" max="3600">
@@ -423,7 +428,7 @@
                     <label>声控响度阈值
                         <input type="number" id="cfg_light_sound_thresh" step="1" min="0" max="100">
                     </label>
-                    <span class="hint-inline">0~100；响度再放大 5 倍（当前 7 对应新 35），可按 1 精细调整</span>
+                    <span class="hint-inline">0~100；数值越低越敏感，可按 1 精细调整</span>
                 </div>
                 <div class="cfg-row">
                     <label>触发持续(秒)
@@ -448,6 +453,36 @@
             </fieldset>
 
             <fieldset class="cfg-section wide">
+                <legend>camera-hub 远端连接</legend>
+                <div class="cfg-row">
+                    <span class="status-chip" id="cameraHubConnStat" data-state="idle">未连接</span>
+                    <button type="button" id="cameraHubRefresh" class="btn-quiet">检测连接</button>
+                </div>
+                <div class="cfg-row">
+                    <label>camera-hub URL
+                        <input type="text" id="cfg_camera_hub_url"
+                            placeholder="http://mi6.gwghome.site">
+                    </label>
+                    <span class="hint-inline">推荐使用 DDNS 域名；标准 HTTP 80 无需端口</span>
+                </div>
+                <div class="cfg-row">
+                    <label class="toggle-label"><input type="checkbox" id="cfg_camera_hub_follow_board_prefix">
+                        跟随开发板公网 IPv6 /64 网段
+                    </label>
+                    <span class="hint-inline">仅用于 IPv6 字面量；使用 DDNS 域名时无需勾选</span>
+                </div>
+                <div class="cfg-row">
+                    <label>设备 ID
+                        <input type="text" id="cfg_camera_hub_device_id" maxlength="64" placeholder="v831cam">
+                    </label>
+                </div>
+                <div class="hint" id="cameraHubResolvedUrl">
+                    URL 非空时自动建立单条 WebSocket 并上传媒体；清空 URL 即停止连接。
+                    AI 与远端录像请在 camera-hub Web 中配置。
+                </div>
+            </fieldset>
+
+            <fieldset class="cfg-section wide">
                 <legend>MQTT IPv6 上报（公网 IPv6 变化时推送）</legend>
                 <div class="cfg-row">
                     <label class="toggle-label"><input type="checkbox" id="cfg_mqtt_enabled"> 启用 IPv6 地址 MQTT 上报</label>
@@ -466,7 +501,7 @@
                 </div>
                 <div class="cfg-row">
                     <label>发布主题
-                        <input type="text" id="cfg_mqtt_topic" placeholder="cam/ipv6">
+                        <input type="text" id="cfg_mqtt_topic" placeholder="geng-cam-ipv6">
                     </label>
                     <span class="hint-inline">payload 为纯 IPv6 字符串</span>
                 </div>

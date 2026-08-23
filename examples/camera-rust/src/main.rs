@@ -1,155 +1,98 @@
-mod camera;
-mod encoder;
-mod server;
-mod terminal;
-mod vo;
-mod memory;
-mod nal;
-
-use anyhow::Result;
-use tokio::signal;
+use anyhow::{Context, Result};
+use camera_rust::app::AppState;
+use camera_rust::http::HttpServers;
+use camera_rust::native::TlsContext;
+use camera_rust::websocket::WebSocketServers;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use std::thread::sleep as thread_sleep;
+use std::thread;
 use std::time::Duration;
-use tracing::info;
-use std::net::SocketAddr;
-use encoder::Encoder;
 
-// 导入绑定
-include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+static RUNNING: AtomicBool = AtomicBool::new(true);
 
-fn main() {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async {
-            if let Err(e) = run().await {
-                eprintln!("Error: {:?}", e);
-            }
-        });
+extern "C" fn stop_signal(_: libc::c_int) {
+    RUNNING.store(false, Ordering::Release);
 }
 
-async fn run() -> Result<()> {
-    // 初始化日志
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("camera-rust fatal: {error:#}");
+        std::process::exit(1);
+    }
+}
 
-    info!("main enter!");
-    
-    // 等待8秒让设备获取IP地址和时间
-    info!("Waiting for 8 seconds to get IP address and time...");
-    thread_sleep(Duration::from_secs(8));
-
-    // 初始化模块
+fn run() -> Result<()> {
+    eprintln!("[rust-stage] main entered");
     unsafe {
-        let ret = libmaix_image_module_init();
-        if ret != libmaix_err_t_LIBMAIX_ERR_NONE {
-            anyhow::bail!("Failed to initialize image module: {}", ret);
-        }
-        
-        libmaix_camera_module_init();
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        libc::signal(libc::SIGINT, stop_signal as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGTERM,
+            stop_signal as *const () as libc::sighandler_t,
+        );
     }
 
-    // 创建相机
-    let camera = Arc::new(Mutex::new(camera::Camera::new()?));
-    let camera_config = camera::CameraConfig::default();
-    camera.lock().await.init(&camera_config)?;
-    camera.lock().await.start()?;
+    // Match the C++ service: give DHCP/NTP a short startup window before
+    // naming files and rendering the first OSD timestamp.
+    thread::sleep(Duration::from_secs(8));
+    eprintln!("[rust-stage] startup delay complete");
 
-    // 获取相机分辨率
-    let width = camera.lock().await.get_width();
-    let height = camera.lock().await.get_height();
-    info!("Camera initialized with resolution: {}x{}", width, height);
+    let runtime_dir = runtime_directory()?;
+    let state = AppState::build(runtime_dir.clone())?;
+    eprintln!("[rust-stage] application state ready");
+    let tls = load_tls(&runtime_dir);
 
-    // 创建 H264 编码器
-    let encoder = Arc::new(Mutex::new(encoder::h264::H264Encoder::new(width, height)?));
-    info!("H264 encoder initialized");
+    let http = HttpServers::start(state.clone(), tls.clone())?;
+    let websocket = WebSocketServers::start(state.clone(), tls)?;
+    eprintln!("[rust-stage] network listeners ready");
+    state.engine.start()?;
+    eprintln!("[rust-stage] native media engine ready");
 
-    // 强制关键帧以获取 SPS/PPS 数据
-    encoder.lock().await.force_keyframe()?;
-    info!("Forced keyframe to get SPS/PPS data");
-
-    // 创建 TCP 服务器
-    let addr: SocketAddr = "0.0.0.0:8080".parse()?;
-    let tcp_server = Arc::new(Mutex::new(server::tcp::TcpServer::new(addr)));
-    tcp_server.lock().await.start().await?;
-    info!("TCP server started on {}", addr);
-
-    // 启动 TCP 服务器线程
-    let tcp_server_clone = tcp_server.clone();
-    tokio::spawn(async move {
-        if let Err(e) = tcp_server_clone.lock().await.run().await {
-            eprintln!("TCP server error: {:?}", e);
-        }
-    });
-
-    // 分配帧缓冲区
-    let frame_size = (width * height * 3 / 2) as usize; // YUV420
-    let mut frame_buffer = vec![0u8; frame_size];
-
-    // 主循环：采集→编码→传输
-    let mut frame_count = 0;
-    let mut last_keyframe_time = std::time::Instant::now();
-    
-    // 等待 Ctrl+C 信号
-    let ctrl_c = tokio::signal::ctrl_c();
-    tokio::select! {
-        _ = ctrl_c => {
-            info!("Received Ctrl+C, shutting down...");
-        }
-        _ = async {
-            loop {
-                // 采集帧
-                { 
-                    let camera = camera.lock().await;
-                    if let Err(e) = camera.capture(frame_buffer.as_mut_ptr()) {
-                        eprintln!("Camera capture error: {:?}", e);
-                        break;
-                    }
-                }
-
-                // 每30帧强制一次关键帧
-                frame_count += 1;
-                if frame_count % 30 == 0 || last_keyframe_time.elapsed() > Duration::from_secs(10) {
-                    if let Err(e) = encoder.lock().await.force_keyframe() {
-                        eprintln!("Encoder force keyframe error: {:?}", e);
-                    }
-                    last_keyframe_time = std::time::Instant::now();
-                    info!("Forced keyframe at frame {}", frame_count);
-                }
-
-                // 编码帧
-                let encoded_data = match encoder.lock().await.encode(&frame_buffer) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        eprintln!("Encoder error: {:?}", e);
-                        continue;
-                    }
-                };
-
-                // 传输编码数据
-                if !encoded_data.is_empty() {
-                    if let Err(e) = tcp_server.lock().await.send_h264_frame(&encoded_data).await {
-                        eprintln!("TCP send error: {:?}", e);
-                    }
-                }
-
-                // 控制帧率
-                tokio::time::sleep(Duration::from_millis(33)).await; // ~30fps
-            }
-        } => {}
+    eprintln!(
+        "camera-rust started: HTTP=80 HTTPS=443 WS=8081/8082 WSS=8444/8445 runtime={}",
+        runtime_dir.display()
+    );
+    while RUNNING.load(Ordering::Acquire) {
+        thread::sleep(Duration::from_millis(250));
     }
 
-    // 反初始化模块
-    unsafe {
-        libmaix_camera_module_deinit();
-        libmaix_image_module_deinit();
-    }
-
-    info!("main end!");
-
+    // Stop external entry points before releasing media callbacks and devices.
+    drop(http);
+    drop(websocket);
+    state.webrtc.close();
+    state.engine.stop();
+    eprintln!("camera-rust stopped");
     Ok(())
+}
+
+fn runtime_directory() -> Result<PathBuf> {
+    let executable = std::env::current_exe().context("resolve /proc/self/exe")?;
+    executable
+        .parent()
+        .map(PathBuf::from)
+        .context("executable has no parent directory")
+}
+
+fn load_tls(runtime_dir: &std::path::Path) -> Option<Arc<TlsContext>> {
+    let managed_cert = runtime_dir.join("state/tls/fullchain.pem");
+    let managed_key = runtime_dir.join("state/tls/private.key");
+    let legacy_cert = runtime_dir.join("cert/server.crt");
+    let legacy_key = runtime_dir.join("cert/server.key");
+    let (cert, key) = if managed_cert.is_file() && managed_key.is_file() {
+        (managed_cert, managed_key)
+    } else {
+        (legacy_cert, legacy_key)
+    };
+    if !cert.is_file() || !key.is_file() {
+        eprintln!("TLS certificate missing; HTTPS/WSS disabled");
+        return None;
+    }
+    match TlsContext::new(&cert.to_string_lossy(), &key.to_string_lossy()) {
+        Ok(context) => Some(Arc::new(context)),
+        Err(error) => {
+            eprintln!("TLS init failed; HTTPS/WSS disabled: {error:#}");
+            None
+        }
+    }
 }
