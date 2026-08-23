@@ -10,6 +10,7 @@
         settings: document.getElementById('pane-settings'),
     };
     const deviceChip = document.getElementById('deviceChip');
+    const logoutButton = document.getElementById('logoutButton');
     const toastStack = document.getElementById('toastStack');
     const confirmBackdrop = document.getElementById('confirmBackdrop');
     const confirmMessage = document.getElementById('confirmMessage');
@@ -17,6 +18,18 @@
     const confirmCancel = document.getElementById('confirmCancel');
     let curTab = 'live';
     let confirmResolver = null;
+
+    logoutButton.addEventListener('click', async () => {
+        try {
+            await fetch('/api/auth/logout', {
+                method: 'POST',
+                cache: 'no-store'
+            });
+        } finally {
+            location.replace('/login');
+        }
+    });
+
     for (const tab of tabs.querySelectorAll('.tab')) {
         tab.tabIndex = tab.classList.contains('active') ? 0 : -1;
     }
@@ -1607,8 +1620,8 @@
     setInterval(refreshSysInfo, 5000);
     refreshSysInfo();
 
-    // 自动起播
-    liveWanted = true;
+    // 默认不拉流，避免仅打开管理页面就占用编码和网络资源。
+    setStat('未开始直播');
     syncLiveControls();
     syncLiveVisibility('initial');
 

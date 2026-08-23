@@ -126,10 +126,11 @@ bool C_TlsContext::Init(const std::string& certPemPath, const std::string& keyPe
     SSL_CTX_set_options(m_ctx,
         SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1);
 
-    // 证书 + 私钥
-    if (SSL_CTX_use_certificate_file(m_ctx, certPemPath.c_str(), SSL_FILETYPE_PEM) <= 0) {
-        DumpOpenSslErr("use_cert");
-        CLOG_ERR("TLS load cert fail: %s\n", certPemPath.c_str());
+    // fullchain.pem 的首张是叶子证书，后续是中间证书。chain_file 会同时
+    // 加载并在握手时发送完整链，避免客户端依赖本地中间证书缓存。
+    if (SSL_CTX_use_certificate_chain_file(m_ctx, certPemPath.c_str()) <= 0) {
+        DumpOpenSslErr("use_cert_chain");
+        CLOG_ERR("TLS load certificate chain fail: %s\n", certPemPath.c_str());
         return false;
     }
     if (SSL_CTX_use_PrivateKey_file(m_ctx, keyPemPath.c_str(), SSL_FILETYPE_PEM) <= 0) {

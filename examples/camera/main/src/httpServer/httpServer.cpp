@@ -114,6 +114,217 @@ std::string SanitizeUrlPath(const std::string& urlPath)
     return p.substr(1); // 去掉前导 '/'
 }
 
+std::string HeaderValue(const std::string& request, const std::string& wanted)
+{
+    size_t lineStart = request.find("\r\n");
+    if (lineStart == std::string::npos) return std::string();
+    lineStart += 2;
+    while (lineStart < request.size()) {
+        size_t lineEnd = request.find("\r\n", lineStart);
+        if (lineEnd == std::string::npos || lineEnd == lineStart) break;
+        size_t colon = request.find(':', lineStart);
+        if (colon != std::string::npos && colon < lineEnd &&
+            colon - lineStart == wanted.size()) {
+            bool equal = true;
+            for (size_t i = 0; i < wanted.size(); ++i) {
+                if (tolower((unsigned char)request[lineStart + i]) !=
+                    tolower((unsigned char)wanted[i])) {
+                    equal = false;
+                    break;
+                }
+            }
+            if (equal) {
+                size_t first = colon + 1;
+                while (first < lineEnd &&
+                       (request[first] == ' ' || request[first] == '\t')) {
+                    ++first;
+                }
+                size_t last = lineEnd;
+                while (last > first &&
+                       (request[last - 1] == ' ' || request[last - 1] == '\t')) {
+                    --last;
+                }
+                return request.substr(first, last - first);
+            }
+        }
+        lineStart = lineEnd + 2;
+    }
+    return std::string();
+}
+
+bool ConstantTimeEqual(const std::string& left, const std::string& right)
+{
+    size_t difference = left.size() ^ right.size();
+    const size_t length = std::max(left.size(), right.size());
+    for (size_t i = 0; i < length; ++i) {
+        const unsigned char l =
+            i < left.size() ? (unsigned char)left[i] : 0;
+        const unsigned char r =
+            i < right.size() ? (unsigned char)right[i] : 0;
+        difference |= (size_t)(l ^ r);
+    }
+    return difference == 0;
+}
+
+bool HasSessionCookie(const std::string& cookieHeader, const std::string& token)
+{
+    if (cookieHeader.empty() || token.empty()) return false;
+    size_t start = 0;
+    while (start < cookieHeader.size()) {
+        size_t end = cookieHeader.find(';', start);
+        if (end == std::string::npos) end = cookieHeader.size();
+        size_t first = start;
+        while (first < end && (cookieHeader[first] == ' ' ||
+                               cookieHeader[first] == '\t')) {
+            ++first;
+        }
+        const size_t equals = cookieHeader.find('=', first);
+        if (equals != std::string::npos && equals < end) {
+            size_t nameEnd = equals;
+            while (nameEnd > first && (cookieHeader[nameEnd - 1] == ' ' ||
+                                       cookieHeader[nameEnd - 1] == '\t')) {
+                --nameEnd;
+            }
+            size_t valueStart = equals + 1;
+            while (valueStart < end && (cookieHeader[valueStart] == ' ' ||
+                                        cookieHeader[valueStart] == '\t')) {
+                ++valueStart;
+            }
+            size_t valueEnd = end;
+            while (valueEnd > valueStart &&
+                   (cookieHeader[valueEnd - 1] == ' ' ||
+                    cookieHeader[valueEnd - 1] == '\t')) {
+                --valueEnd;
+            }
+            if (cookieHeader.compare(first, nameEnd - first,
+                                     "camera_session") == 0 &&
+                ConstantTimeEqual(
+                    cookieHeader.substr(valueStart, valueEnd - valueStart),
+                    token)) {
+                return true;
+            }
+        }
+        start = end + 1;
+    }
+    return false;
+}
+
+int HexValue(char value)
+{
+    if (value >= '0' && value <= '9') return value - '0';
+    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+    return -1;
+}
+
+std::string UrlDecode(const std::string& value)
+{
+    std::string decoded;
+    decoded.reserve(value.size());
+    for (size_t i = 0; i < value.size(); ++i) {
+        if (value[i] == '+' ) {
+            decoded.push_back(' ');
+        } else if (value[i] == '%' && i + 2 < value.size()) {
+            const int high = HexValue(value[i + 1]);
+            const int low = HexValue(value[i + 2]);
+            if (high >= 0 && low >= 0) {
+                decoded.push_back((char)((high << 4) | low));
+                i += 2;
+            } else {
+                decoded.push_back(value[i]);
+            }
+        } else {
+            decoded.push_back(value[i]);
+        }
+    }
+    return decoded;
+}
+
+std::string FormValue(const std::string& body, const std::string& wanted)
+{
+    size_t start = 0;
+    while (start <= body.size()) {
+        size_t end = body.find('&', start);
+        if (end == std::string::npos) end = body.size();
+        const std::string pair = body.substr(start, end - start);
+        const size_t equals = pair.find('=');
+        const std::string name =
+            UrlDecode(pair.substr(0, equals == std::string::npos
+                                      ? pair.size() : equals));
+        if (name == wanted) {
+            return equals == std::string::npos
+                ? std::string()
+                : UrlDecode(pair.substr(equals + 1));
+        }
+        if (end == body.size()) break;
+        start = end + 1;
+    }
+    return std::string();
+}
+
+std::string LoginPage(bool invalid)
+{
+    const char* error = invalid
+        ? "<p class=\"error\" role=\"alert\">用户名或密码错误</p>"
+        : "";
+    std::ostringstream html;
+    html <<
+R"(<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>登录 - 设备监控台</title>
+<style>
+:root{color-scheme:light;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f3f5f7;color:#17212b}
+main{width:min(360px,calc(100% - 32px));padding:28px;background:#fff;border:1px solid #d9e0e6;border-radius:8px;box-shadow:0 12px 30px rgba(23,33,43,.12)}
+h1{margin:0 0 6px;font-size:24px;letter-spacing:0}
+p{margin:0 0 22px;color:#5d6975}
+label{display:block;margin:14px 0 6px;font-size:14px;font-weight:600}
+input{width:100%;height:42px;padding:0 11px;border:1px solid #b8c2cc;border-radius:6px;font:inherit}
+input:focus{outline:2px solid #1677ff;outline-offset:1px;border-color:#1677ff}
+button{width:100%;height:42px;margin-top:20px;border:0;border-radius:6px;background:#1677ff;color:#fff;font:600 15px inherit;cursor:pointer}
+.error{margin:12px 0 0;color:#b42318;font-size:14px}
+</style>
+</head>
+<body>
+<main>
+<h1>设备监控台</h1>
+<p>登录后访问设备管理功能</p>
+<form method="post" action="/api/auth/login">
+<label for="username">用户名</label>
+<input id="username" name="username" autocomplete="username" required autofocus>
+<label for="password">密码</label>
+<input id="password" name="password" type="password" autocomplete="current-password" required>
+)";
+    html << error;
+    html <<
+R"(<button type="submit">登录</button>
+</form>
+</main>
+</body>
+</html>)";
+    return html.str();
+}
+
+std::string HttpsHost(const std::string& request)
+{
+    std::string host = HeaderValue(request, "Host");
+    if (host.empty() ||
+        !std::all_of(host.begin(), host.end(), [](unsigned char value) {
+            return isalnum(value) || value == '.' || value == '-' ||
+                   value == ':' || value == '[' || value == ']';
+        })) {
+        host = "v831.gwghome.site";
+    }
+    if (host.size() > 3 && host.compare(host.size() - 3, 3, ":80") == 0) {
+        host.resize(host.size() - 3);
+    }
+    return host;
+}
+
 } // namespace
 
 C_HttpServer::C_HttpServer(int port)
@@ -240,6 +451,15 @@ void C_HttpServer::EnableTls(int tlsPort, C_TlsContext* pTls)
 {
     m_tlsPort = tlsPort;
     m_pTls    = pTls;
+}
+
+void C_HttpServer::ConfigureWebAuth(const std::string& username,
+                                    const std::string& password,
+                                    const std::string& token)
+{
+    m_authUsername = username;
+    m_authPassword = password;
+    m_authToken = token;
 }
 
 void C_HttpServer::Stop()
@@ -668,6 +888,95 @@ void C_HttpServer::HandleHttpRequest(int fd, C_SslConn* ssl, const std::string& 
         }
     }
 
+    // ACME HTTP-01 必须保持公开且不能跳转，否则证书续期会失效。
+    const bool isAcme =
+        method == "GET" &&
+        path.compare(0, strlen("/.well-known/acme-challenge/"),
+                     "/.well-known/acme-challenge/") == 0;
+    if (isAcme) {
+        ApiResponse acmeResponse;
+        if (TryDispatchApi(method, path, query, body, acmeResponse)) {
+            if (!acmeResponse.filePath.empty()) {
+                SendFileResponse(fd, ssl, acmeResponse.filePath,
+                                 acmeResponse.contentType, rangeHeader);
+            } else {
+                SendHttpResponse(fd, ssl, acmeResponse.status,
+                                 acmeResponse.status == 200 ? "OK" : "ERROR",
+                                 acmeResponse.contentType, acmeResponse.body);
+            }
+        } else {
+            SendHttpResponse(fd, ssl, 404, "Not Found",
+                             "text/plain", "challenge not found");
+        }
+        return;
+    }
+
+    // 有可用 HTTPS 监听时，管理页面和登录凭据一律不走明文。
+    if (!ssl && m_tlsServerFd >= 0) {
+        SendHttpResponse(fd, ssl, 303, "See Other", "text/plain", "",
+                         "Location: https://" + HttpsHost(request) + rawPath + "\r\n");
+        return;
+    }
+
+    const bool authorized =
+        HasSessionCookie(HeaderValue(request, "Cookie"), m_authToken);
+
+    if (method == "GET" && path == "/login") {
+        if (authorized) {
+            SendHttpResponse(fd, ssl, 303, "See Other", "text/plain", "",
+                             "Location: /\r\n");
+        } else {
+            SendHttpResponse(fd, ssl, 200, "OK",
+                             "text/html; charset=utf-8", LoginPage(false));
+        }
+        return;
+    }
+
+    if (method == "POST" && path == "/api/auth/login") {
+        const std::string username = FormValue(body, "username");
+        const std::string password = FormValue(body, "password");
+        if (ConstantTimeEqual(username, m_authUsername) &
+            ConstantTimeEqual(password, m_authPassword)) {
+            std::string headers =
+                "Location: /\r\n"
+                "Set-Cookie: camera_session=" + m_authToken +
+                "; Path=/; Max-Age=604800; HttpOnly; SameSite=Strict";
+            if (ssl) headers += "; Secure";
+            headers += "\r\n";
+            SendHttpResponse(fd, ssl, 303, "See Other",
+                             "text/plain", "", headers);
+        } else {
+            SendHttpResponse(fd, ssl, 401, "Unauthorized",
+                             "text/html; charset=utf-8", LoginPage(true));
+        }
+        return;
+    }
+
+    if (method == "POST" && path == "/api/auth/logout") {
+        std::string headers =
+            "Location: /login\r\n"
+            "Set-Cookie: camera_session=; Path=/; Max-Age=0; "
+            "HttpOnly; SameSite=Strict";
+        if (ssl) headers += "; Secure";
+        headers += "\r\n";
+        SendHttpResponse(fd, ssl, 303, "See Other",
+                         "text/plain", "", headers);
+        return;
+    }
+
+    if (!authorized) {
+        if (path.compare(0, strlen("/api/"), "/api/") == 0) {
+            SendHttpResponse(
+                fd, ssl, 401, "Unauthorized",
+                "application/json; charset=utf-8",
+                "{\"ok\":false,\"err\":\"authentication required\"}");
+        } else {
+            SendHttpResponse(fd, ssl, 303, "See Other", "text/plain", "",
+                             "Location: /login\r\n");
+        }
+        return;
+    }
+
     // 优先尝试 API 路由（method + path 精确匹配）
     {
         ApiResponse apiResp;
@@ -790,7 +1099,8 @@ bool C_HttpServer::TryDispatchApi(const std::string& method,
 
 void C_HttpServer::SendHttpResponse(int fd, C_SslConn* ssl,
                                    int statusCode, const std::string& statusText,
-                                   const std::string& contentType, const std::string& content)
+                                   const std::string& contentType, const std::string& content,
+                                   const std::string& extraHeaders)
 {
     std::string response = "HTTP/1.1 " + std::to_string(statusCode) + " " + statusText + "\r\n";
     response += "Content-Type: " + contentType + "\r\n";
@@ -799,6 +1109,7 @@ void C_HttpServer::SendHttpResponse(int fd, C_SslConn* ssl,
     response += "Cache-Control: no-cache, no-store, must-revalidate\r\n";
     response += "Pragma: no-cache\r\n";
     response += "Expires: 0\r\n";
+    response += extraHeaders;
     response += "\r\n";
     response += content;
 

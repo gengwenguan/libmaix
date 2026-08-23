@@ -51,6 +51,11 @@ public:
     // 调用后 Start() 会同时监听 m_port (HTTP) 和 tlsPort (HTTPS)。
     void EnableTls(int tlsPort, C_TlsContext* pTls);
 
+    // 配置浏览器管理面的登录凭据和会话 token。必须在 Start() 前调用。
+    void ConfigureWebAuth(const std::string& username,
+                          const std::string& password,
+                          const std::string& token);
+
     int Start();
     void Stop();
 
@@ -77,7 +82,8 @@ private:
     void HandleHttpRequest(int fd, C_SslConn* ssl, const std::string& request);
     void SendHttpResponse(int fd, C_SslConn* ssl,
                           int statusCode, const std::string& statusText, 
-                          const std::string& contentType, const std::string& content);
+                          const std::string& contentType, const std::string& content,
+                          const std::string& extraHeaders = std::string());
 
     // 内部 IO 包装：根据 ssl 是否非空走 SSL_read/SSL_write 或 plain recv/send。
     // 非阻塞：读到 want_more / EAGAIN 时返回 -1 且 wantMore=true
@@ -118,6 +124,11 @@ private:
     int           m_tlsPort   = 0;
     int           m_tlsServerFd = -1;
     C_TlsContext* m_pTls      = nullptr;
+
+    // 浏览器管理面鉴权。设备到 Camera-hub 的上传链路不经过 HTTP/WS 服务。
+    std::string m_authUsername;
+    std::string m_authPassword;
+    std::string m_authToken;
 
     // API 路由表：key = "METHOD path"，例如 "POST /api/record/start"
     std::mutex                          m_apiMutex;

@@ -36,6 +36,101 @@ static const size_t kMaxHandshakeBytes = 16 * 1024;
 static const size_t kMaxClientPayload  = 64 * 1024;
 static const auto   kHandshakeTimeout  = std::chrono::seconds(5);
 
+static std::string HeaderValue(const std::string& request,
+                               const std::string& wanted)
+{
+    size_t lineStart = request.find("\r\n");
+    if (lineStart == std::string::npos) return std::string();
+    lineStart += 2;
+    while (lineStart < request.size()) {
+        size_t lineEnd = request.find("\r\n", lineStart);
+        if (lineEnd == std::string::npos || lineEnd == lineStart) break;
+        size_t colon = request.find(':', lineStart);
+        if (colon != std::string::npos && colon < lineEnd &&
+            colon - lineStart == wanted.size()) {
+            bool equal = true;
+            for (size_t i = 0; i < wanted.size(); ++i) {
+                if (tolower((unsigned char)request[lineStart + i]) !=
+                    tolower((unsigned char)wanted[i])) {
+                    equal = false;
+                    break;
+                }
+            }
+            if (equal) {
+                size_t first = colon + 1;
+                while (first < lineEnd &&
+                       (request[first] == ' ' || request[first] == '\t')) {
+                    ++first;
+                }
+                size_t last = lineEnd;
+                while (last > first &&
+                       (request[last - 1] == ' ' ||
+                        request[last - 1] == '\t')) {
+                    --last;
+                }
+                return request.substr(first, last - first);
+            }
+        }
+        lineStart = lineEnd + 2;
+    }
+    return std::string();
+}
+
+static bool ConstantTimeEqual(const std::string& left,
+                              const std::string& right)
+{
+    size_t difference = left.size() ^ right.size();
+    const size_t length = std::max(left.size(), right.size());
+    for (size_t i = 0; i < length; ++i) {
+        const unsigned char l =
+            i < left.size() ? (unsigned char)left[i] : 0;
+        const unsigned char r =
+            i < right.size() ? (unsigned char)right[i] : 0;
+        difference |= (size_t)(l ^ r);
+    }
+    return difference == 0;
+}
+
+static bool HasSessionCookie(const std::string& cookieHeader,
+                             const std::string& token)
+{
+    if (cookieHeader.empty() || token.empty()) return false;
+    size_t start = 0;
+    while (start < cookieHeader.size()) {
+        size_t end = cookieHeader.find(';', start);
+        if (end == std::string::npos) end = cookieHeader.size();
+        size_t first = start;
+        while (first < end &&
+               (cookieHeader[first] == ' ' || cookieHeader[first] == '\t')) {
+            ++first;
+        }
+        const size_t equals = cookieHeader.find('=', first);
+        if (equals != std::string::npos && equals < end) {
+            size_t valueStart = equals + 1;
+            while (valueStart < end &&
+                   (cookieHeader[valueStart] == ' ' ||
+                    cookieHeader[valueStart] == '\t')) {
+                ++valueStart;
+            }
+            size_t valueEnd = end;
+            while (valueEnd > valueStart &&
+                   (cookieHeader[valueEnd - 1] == ' ' ||
+                    cookieHeader[valueEnd - 1] == '\t')) {
+                --valueEnd;
+            }
+            if (cookieHeader.compare(first, equals - first,
+                                     "camera_session") == 0 &&
+                ConstantTimeEqual(
+                    cookieHeader.substr(valueStart, valueEnd - valueStart),
+                    token)) {
+                return true;
+            }
+        }
+        start = end + 1;
+    }
+    return false;
+}
+
 static int OpenDualStackListener(int port, const char* label)
 {
     int fd = socket(AF_INET6, SOCK_STREAM, 0);
@@ -229,6 +324,11 @@ void C_WebSocketServer::EnableTls(int tlsPort, C_TlsContext* pTls)
 {
     m_tlsPort = tlsPort;
     m_pTls    = pTls;
+}
+
+void C_WebSocketServer::ConfigureWebAuth(const std::string& token)
+{
+    m_authToken = token;
 }
 
 int C_WebSocketServer::Start()
@@ -777,6 +877,38 @@ bool C_WebSocketServer::HandleHandshake(int fd, const std::vector<unsigned char>
         return false; // 数据不完整
     }
 
+    auto client = GetClient(fd);
+    if (!client) {
+        CLOG_ERR("WebSocket握手失败: fd=%d 已无对应客户端\n", fd);
+        return false;
+    }
+
+    if (!HasSessionCookie(HeaderValue(request, "Cookie"), m_authToken)) {
+        const std::string unauthorized =
+            "HTTP/1.1 401 Unauthorized\r\n"
+            "Content-Length: 0\r\n"
+            "Connection: close\r\n\r\n";
+        const char* p = unauthorized.data();
+        size_t remain = unauthorized.size();
+        const auto deadline =
+            std::chrono::steady_clock::now() + kHandshakeTimeout;
+        while (remain > 0) {
+            bool wantMore = false;
+            int written = IoWrite(client.get(), p, (int)remain, wantMore);
+            if (written > 0) {
+                p += written;
+                remain -= (size_t)written;
+                continue;
+            }
+            if (!wantMore || std::chrono::steady_clock::now() >= deadline) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        CLOG_INF("WebSocket握手拒绝: fd=%d 未登录\n", fd);
+        return false;
+    }
+
     // 解析请求行中的 URL path（"GET /ws/talk HTTP/1.1"）
     std::string urlPath = "/";
     {
@@ -817,11 +949,6 @@ bool C_WebSocketServer::HandleHandshake(int fd, const std::vector<unsigned char>
         "\r\n";
 
     // 通过 IoWrite 发送响应（同时支持 ws/wss）
-    auto client = GetClient(fd);
-    if (!client) {
-        CLOG_ERR("WebSocket握手响应失败: fd=%d 已无对应客户端\n", fd);
-        return false;
-    }
     client->urlPath = urlPath;
 
     const char* p = response.c_str();

@@ -8,8 +8,12 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <fcntl.h>
+#include <iomanip>
 #include <sstream>
+#include <stdexcept>
 #include <fstream>
 #include <cstring>
 #include <tuple>
@@ -59,6 +63,41 @@ void BuildAdtsFrame(const unsigned char* aac, unsigned int aacLen,
     p[6] = 0xFC;
     memcpy(p + 7, aac, aacLen);
 }
+
+std::string EnvOrDefault(const char* name, const char* fallback)
+{
+    const char* value = getenv(name);
+    return value && value[0] != '\0' ? value : fallback;
+}
+
+std::string GenerateSessionToken()
+{
+    std::array<unsigned char, 32> bytes{};
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    size_t offset = 0;
+    while (fd >= 0 && offset < bytes.size()) {
+        ssize_t count = read(fd, bytes.data() + offset, bytes.size() - offset);
+        if (count > 0) {
+            offset += (size_t)count;
+        } else if (count < 0 && errno == EINTR) {
+            continue;
+        } else {
+            break;
+        }
+    }
+    if (fd >= 0) close(fd);
+    if (offset != bytes.size()) {
+        CLOG_ERR("读取 /dev/urandom 失败，无法创建 Web 会话\n");
+        throw std::runtime_error("web session entropy unavailable");
+    }
+
+    std::ostringstream token;
+    token << std::hex << std::setfill('0');
+    for (unsigned char byte : bytes) {
+        token << std::setw(2) << (unsigned int)byte;
+    }
+    return token.str();
+}
 } // namespace
 
 
@@ -83,6 +122,15 @@ C_Terminal::C_Terminal(unsigned int Wight, unsigned int Hight, libmaix_cam_t* ai
     CLOG_INF("WebSocket直播端口: 8081 (fMP4 over WebSocket)\n");
     CLOG_INF("WebSocket回放端口: 8082\n");
     CLOG_INF("HTTP服务器端口: 80\n");
+
+    const std::string authUser =
+        EnvOrDefault("CAMERA_WEB_USERNAME", "admin");
+    const std::string authPassword =
+        EnvOrDefault("CAMERA_WEB_PASSWORD", "12345");
+    const std::string authToken = GenerateSessionToken();
+    m_pHttpServer->ConfigureWebAuth(authUser, authPassword, authToken);
+    m_pWsServer->ConfigureWebAuth(authToken);
+    m_pWsFileServer->ConfigureWebAuth(authToken);
 
     // 录像目录：放在 <exe_dir>/record/，跟 web/ 同级，方便统一管理
     char exePath[1024] = {0};

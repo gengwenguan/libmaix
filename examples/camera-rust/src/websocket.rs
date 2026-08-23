@@ -171,6 +171,18 @@ fn handle_client(
     shutdown: Arc<AtomicBool>,
 ) -> Result<()> {
     let request = connection.read_until(b"\r\n\r\n", MAX_HANDSHAKE, Duration::from_secs(5))?;
+    if !state
+        .web_auth
+        .authorized_cookie(handshake_cookie(&request).as_deref())
+    {
+        connection.write_all_timeout(
+            b"HTTP/1.1 401 Unauthorized\r\n\
+              Content-Length: 0\r\n\
+              Connection: close\r\n\r\n",
+            WRITE_TIMEOUT,
+        )?;
+        anyhow::bail!("WebSocket authentication required");
+    }
     let (path, key) = parse_handshake(&request)?;
     let accept = websocket_accept(&key);
     let response = format!(
@@ -230,6 +242,15 @@ fn parse_handshake(request: &[u8]) -> Result<(String, String)> {
         anyhow::bail!("missing WebSocket Upgrade header");
     }
     Ok((path, key.context("missing Sec-WebSocket-Key")?))
+}
+
+fn handshake_cookie(request: &[u8]) -> Option<String> {
+    let request = std::str::from_utf8(request).ok()?;
+    request.split("\r\n").find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("cookie")
+            .then(|| value.trim().to_owned())
+    })
 }
 
 fn websocket_accept(key: &str) -> String {
@@ -373,5 +394,13 @@ mod tests {
         let (_, payload, consumed) = parse_frame(&frame).unwrap().unwrap();
         assert_eq!(payload, b"abc");
         assert_eq!(consumed, frame.len());
+    }
+
+    #[test]
+    fn reads_cookie_header_case_insensitively() {
+        assert_eq!(
+            handshake_cookie(b"GET / HTTP/1.1\r\ncOoKiE: camera_session=token\r\n\r\n"),
+            Some("camera_session=token".to_owned())
+        );
     }
 }

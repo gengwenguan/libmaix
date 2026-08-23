@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod app;
+pub mod auth;
 pub mod cleaner;
 pub mod config;
 pub mod http;

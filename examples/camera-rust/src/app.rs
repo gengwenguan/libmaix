@@ -1,4 +1,5 @@
 use crate::actions::ActionStore;
+use crate::auth::WebAuth;
 use crate::cleaner::RecordCleaner;
 use crate::config::RuntimeConfig;
 use crate::hub::{BroadcastHub, LiveHub};
@@ -85,6 +86,7 @@ pub struct AppState {
     pub logs: Arc<BroadcastHub>,
     pub webrtc: Arc<WebRtcService>,
     pub remote_hub: RemoteHub,
+    pub web_auth: WebAuth,
     _mqtt: MqttReporter,
     _cleaner: RecordCleaner,
     _light: LightController,
@@ -133,6 +135,7 @@ impl AppState {
             snapshot.clone(),
         )?;
         let mqtt = MqttReporter::start(config.clone())?;
+        let web_auth = WebAuth::from_env();
         let cleaner =
             RecordCleaner::start(runtime_dir.join("record"), config.clone(), recorder.clone())?;
         let light = LightController::start(config.clone(), engine.clone())?;
@@ -164,6 +167,7 @@ impl AppState {
             logs,
             webrtc,
             remote_hub,
+            web_auth,
             _mqtt: mqtt,
             _cleaner: cleaner,
             _light: light,

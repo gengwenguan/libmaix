@@ -111,6 +111,10 @@ impl Connection {
             .unwrap_or_else(|_| "unknown".to_owned())
     }
 
+    pub fn is_tls(&self) -> bool {
+        self.tls.is_some()
+    }
+
     pub fn shutdown(&self) {
         let _ = self.stream.shutdown(Shutdown::Both);
     }

@@ -36,6 +36,7 @@ impl HttpServers {
         let clients = Arc::new(Mutex::new(Vec::new()));
         let active = Arc::new(AtomicUsize::new(0));
         let sysinfo = Arc::new(SysInfo::default());
+        let https_available = tls.is_some();
         let mut accept_threads = Vec::new();
 
         for (port, listener_tls) in [(80, None), (443, tls)] {
@@ -62,6 +63,7 @@ impl HttpServers {
                             shutdown_flag,
                             client_threads,
                             active_clients,
+                            https_available,
                         )
                     })?,
             );
@@ -109,6 +111,7 @@ fn accept_loop(
     shutdown: Arc<AtomicBool>,
     clients: Arc<Mutex<Vec<JoinHandle<()>>>>,
     active: Arc<AtomicUsize>,
+    https_available: bool,
 ) {
     while !shutdown.load(Ordering::Acquire) {
         match listener.accept() {
@@ -125,8 +128,9 @@ fn accept_loop(
                     .name("http-client".to_owned())
                     .stack_size(256 * 1024)
                     .spawn(move || {
-                        let result = Connection::new(stream, tls)
-                            .and_then(|connection| handle_client(connection, &state, &sysinfo));
+                        let result = Connection::new(stream, tls).and_then(|connection| {
+                            handle_client(connection, &state, &sysinfo, https_available)
+                        });
                         if let Err(error) = result {
                             eprintln!("HTTP client failed: {error:#}");
                         }
@@ -179,6 +183,7 @@ struct Response {
     status: u16,
     content_type: &'static str,
     body: Vec<u8>,
+    headers: Vec<(String, String)>,
 }
 
 enum Routed {
@@ -197,6 +202,7 @@ impl Response {
                 status,
                 content_type: "application/json; charset=utf-8",
                 body,
+                headers: Vec::new(),
             },
             Err(error) => Self::text(500, format!("JSON error: {error}")),
         }
@@ -207,13 +213,43 @@ impl Response {
             status,
             content_type: "text/plain; charset=utf-8",
             body: text.into().into_bytes(),
+            headers: Vec::new(),
         }
+    }
+
+    fn html(status: u16, html: impl Into<String>) -> Self {
+        Self {
+            status,
+            content_type: "text/html; charset=utf-8",
+            body: html.into().into_bytes(),
+            headers: Vec::new(),
+        }
+    }
+
+    fn redirect(location: impl Into<String>) -> Self {
+        Self {
+            status: 303,
+            content_type: "text/plain; charset=utf-8",
+            body: Vec::new(),
+            headers: vec![("Location".to_owned(), location.into())],
+        }
+    }
+
+    fn header(mut self, name: &str, value: impl Into<String>) -> Self {
+        self.headers.push((name.to_owned(), value.into()));
+        self
     }
 }
 
-fn handle_client(mut connection: Connection, state: &AppState, sysinfo: &SysInfo) -> Result<()> {
+fn handle_client(
+    mut connection: Connection,
+    state: &AppState,
+    sysinfo: &SysInfo,
+    https_available: bool,
+) -> Result<()> {
+    let is_tls = connection.is_tls();
     let request = read_request(&mut connection)?;
-    let route = route(&request, state, sysinfo);
+    let route = route(&request, state, sysinfo, is_tls, https_available);
     match route {
         Routed::Response(response) => send_response(&mut connection, response)?,
         Routed::File(path, content_type) => send_file(
@@ -290,7 +326,61 @@ fn read_request(connection: &mut Connection) -> Result<Request> {
     })
 }
 
-fn route(request: &Request, state: &AppState, sysinfo: &SysInfo) -> Routed {
+fn route(
+    request: &Request,
+    state: &AppState,
+    sysinfo: &SysInfo,
+    is_tls: bool,
+    https_available: bool,
+) -> Routed {
+    if request.method == "GET" && request.path.starts_with("/.well-known/acme-challenge/") {
+        return match acme_challenge_path(&state.runtime_dir, &request.path) {
+            Some(path) if path.is_file() => Routed::File(path, "text/plain; charset=utf-8"),
+            _ => Routed::Response(Response::text(404, "challenge not found")),
+        };
+    }
+
+    if https_available && !is_tls {
+        return Routed::Response(Response::redirect(https_location(request)));
+    }
+
+    let cookie = request.headers.get("cookie").map(String::as_str);
+    let authorized = state.web_auth.authorized_cookie(cookie);
+    match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/login") => {
+            return Routed::Response(if authorized {
+                Response::redirect("/")
+            } else {
+                Response::html(200, login_page(false))
+            });
+        }
+        ("POST", "/api/auth/login") => {
+            let body = String::from_utf8_lossy(&request.body);
+            let username = form_value(&body, "username").unwrap_or_default();
+            let password = form_value(&body, "password").unwrap_or_default();
+            return Routed::Response(if state.web_auth.verify(&username, &password) {
+                Response::redirect("/").header("Set-Cookie", state.web_auth.set_cookie(is_tls))
+            } else {
+                Response::html(401, login_page(true))
+            });
+        }
+        ("POST", "/api/auth/logout") => {
+            return Routed::Response(
+                Response::redirect("/login")
+                    .header("Set-Cookie", crate::auth::WebAuth::clear_cookie(is_tls)),
+            );
+        }
+        _ => {}
+    }
+
+    if !authorized {
+        return Routed::Response(if request.path.starts_with("/api/") {
+            Response::json_status(401, json!({"ok":false,"err":"authentication required"}))
+        } else {
+            Response::redirect("/login")
+        });
+    }
+
     let result = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/api/webrtc/status") => Routed::Response(Response::json(state.webrtc.status())),
         ("GET", "/api/camera-hub/status") => {
@@ -309,6 +399,7 @@ fn route(request: &Request, state: &AppState, sysinfo: &SysInfo) -> Routed {
                     status: 201,
                     content_type: "application/sdp",
                     body: answer.into_bytes(),
+                    headers: Vec::new(),
                 }),
                 Err(error) => Routed::Response(Response::text(
                     400,
@@ -470,16 +561,6 @@ fn route(request: &Request, state: &AppState, sysinfo: &SysInfo) -> Routed {
                 _ => Routed::Response(Response::text(404, "not found")),
             }
         }
-        _ if request.method == "GET"
-            && request
-                .path
-                .starts_with("/.well-known/acme-challenge/") =>
-        {
-            match acme_challenge_path(&state.runtime_dir, &request.path) {
-                Some(path) if path.is_file() => Routed::File(path, "text/plain; charset=utf-8"),
-                _ => Routed::Response(Response::text(404, "challenge not found")),
-            }
-        }
         ("GET", path) => match static_path(&state.web_dir, path) {
             Some(path) if path.is_file() => Routed::File(path.clone(), mime_type(&path)),
             _ => Routed::Response(Response::text(404, "not found")),
@@ -490,17 +571,24 @@ fn route(request: &Request, state: &AppState, sysinfo: &SysInfo) -> Routed {
 }
 
 fn send_response(connection: &mut Connection, response: Response) -> Result<()> {
-    let header = format!(
+    let mut header = format!(
         "HTTP/1.1 {} {}\r\n\
          Content-Type: {}\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n\
-         Cache-Control: no-cache, no-store, must-revalidate\r\n\r\n",
+         Cache-Control: no-cache, no-store, must-revalidate\r\n",
         response.status,
         status_text(response.status),
         response.content_type,
         response.body.len()
     );
+    for (name, value) in response.headers {
+        header.push_str(&name);
+        header.push_str(": ");
+        header.push_str(&value);
+        header.push_str("\r\n");
+    }
+    header.push_str("\r\n");
     connection.write_all_timeout(header.as_bytes(), WRITE_TIMEOUT)?;
     connection.write_all_timeout(&response.body, WRITE_TIMEOUT)
 }
@@ -558,9 +646,12 @@ fn status_text(status: u16) -> &'static str {
         201 => "Created",
         206 => "Partial Content",
         204 => "No Content",
+        303 => "See Other",
         400 => "Bad Request",
+        401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
+        405 => "Method Not Allowed",
         409 => "Conflict",
         413 => "Payload Too Large",
         416 => "Range Not Satisfiable",
@@ -680,6 +771,80 @@ fn query_value(query: &str, key: &str) -> Option<String> {
         let (name, value) = pair.split_once('=')?;
         (name == key).then(|| percent_decode(value))
     })
+}
+
+fn form_value(body: &str, key: &str) -> Option<String> {
+    query_value(body, key)
+}
+
+fn https_location(request: &Request) -> String {
+    let host = request
+        .headers
+        .get("host")
+        .map(String::as_str)
+        .filter(|host| {
+            !host.is_empty()
+                && host
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b".-:[]".contains(&byte))
+        })
+        .unwrap_or("v831.gwghome.site");
+    let host = if host.starts_with('[') {
+        host.strip_suffix(":80").unwrap_or(host)
+    } else {
+        host.strip_suffix(":80").unwrap_or(host)
+    };
+    let mut location = format!("https://{host}{}", request.path);
+    if !request.query.is_empty() {
+        location.push('?');
+        location.push_str(&request.query);
+    }
+    location
+}
+
+fn login_page(invalid: bool) -> String {
+    let error = if invalid {
+        "<p class=\"error\" role=\"alert\">用户名或密码错误</p>"
+    } else {
+        ""
+    };
+    format!(
+        r#"<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>登录 - 设备监控台</title>
+<style>
+:root{{color-scheme:light;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}
+*{{box-sizing:border-box}}
+body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#f3f5f7;color:#17212b}}
+main{{width:min(360px,calc(100% - 32px));padding:28px;background:#fff;border:1px solid #d9e0e6;border-radius:8px;box-shadow:0 12px 30px rgba(23,33,43,.12)}}
+h1{{margin:0 0 6px;font-size:24px;letter-spacing:0}}
+p{{margin:0 0 22px;color:#5d6975}}
+label{{display:block;margin:14px 0 6px;font-size:14px;font-weight:600}}
+input{{width:100%;height:42px;padding:0 11px;border:1px solid #b8c2cc;border-radius:6px;font:inherit}}
+input:focus{{outline:2px solid #1677ff;outline-offset:1px;border-color:#1677ff}}
+button{{width:100%;height:42px;margin-top:20px;border:0;border-radius:6px;background:#1677ff;color:#fff;font:600 15px inherit;cursor:pointer}}
+.error{{margin:12px 0 0;color:#b42318;font-size:14px}}
+</style>
+</head>
+<body>
+<main>
+<h1>设备监控台</h1>
+<p>登录后访问设备管理功能</p>
+<form method="post" action="/api/auth/login">
+<label for="username">用户名</label>
+<input id="username" name="username" autocomplete="username" required autofocus>
+<label for="password">密码</label>
+<input id="password" name="password" type="password" autocomplete="current-password" required>
+{error}
+<button type="submit">登录</button>
+</form>
+</main>
+</body>
+</html>"#
+    )
 }
 
 fn percent_decode(value: &str) -> String {
@@ -871,9 +1036,7 @@ mod tests {
         let root = Path::new("/root/maix_dist");
         assert_eq!(
             acme_challenge_path(root, "/.well-known/acme-challenge/abc_DEF-123"),
-            Some(
-                root.join("state/acme-webroot/.well-known/acme-challenge/abc_DEF-123")
-            )
+            Some(root.join("state/acme-webroot/.well-known/acme-challenge/abc_DEF-123"))
         );
         assert!(acme_challenge_path(root, "/.well-known/acme-challenge/../key").is_none());
         assert!(acme_challenge_path(root, "/.well-known/acme-challenge/").is_none());

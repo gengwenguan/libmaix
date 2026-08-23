@@ -95,6 +95,9 @@ public:
     // 可选：配置 wss 端口，必须在 Start() 前调用。
     void EnableTls(int tlsPort, C_TlsContext* pTls);
 
+    // 配置浏览器会话 token，WS/WSS 握手必须携带对应 Cookie。
+    void ConfigureWebAuth(const std::string& token);
+
     // 发送二进制数据给指定客户端（fMP4 字节直接通过 WS binary 帧）
     int SendBinary(int fd, unsigned char* pData, unsigned int nLen);
 
@@ -181,6 +184,7 @@ private:
     int           m_tlsServerFd = -1;
     C_TlsContext* m_pTls        = nullptr;
     bool          m_liveSubscribed = false;
+    std::string   m_authToken;
 
     struct ClientThread {
         std::thread thread;

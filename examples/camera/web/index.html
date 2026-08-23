@@ -6,7 +6,7 @@
     <title>设备监控台</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=20260718">
     <link rel="alternate icon" href="/favicon.ico?v=20260718" sizes="16x16 32x32 48x48">
-    <link rel="stylesheet" href="style.css?v=20260716">
+    <link rel="stylesheet" href="style.css?v=20260823">
 </head>
 <body>
 <div class="wrap">
@@ -18,7 +18,10 @@
                 <h1>设备监控台</h1>
             </div>
         </div>
-        <div id="deviceChip" class="device-chip" data-state="idle">连接设备中</div>
+        <div class="header-actions">
+            <div id="deviceChip" class="device-chip" data-state="idle">连接设备中</div>
+            <button id="logoutButton" class="btn-quiet" type="button">退出</button>
+        </div>
     </header>
 
     <nav class="tabs" id="tabs" role="tablist" aria-label="功能导航">
@@ -565,6 +568,6 @@
     </div>
 </div>
 
-<script src="app.js?v=20260716"></script>
+<script src="app.js?v=20260823"></script>
 </body>
 </html>
