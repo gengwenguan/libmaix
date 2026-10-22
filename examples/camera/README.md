@@ -98,6 +98,10 @@ flowchart LR
 
 ## API 速查
 
+管理页面、其他 API 和浏览器 WebSocket 需要登录，默认用户名 `admin`、密码
+`12345`，通过 `camera_session` Cookie 校验会话。`POST /api/prompt` 和 ACME
+challenge 公开访问；提示音接口支持 HTTP/HTTPS，无需登录、Cookie 或 Token。
+
 ### 实况与状态
 
 ```text
@@ -138,6 +142,20 @@ POST /api/actions/invoke
 ```
 
 动作 URL 只接受局域网 `http://` 地址，由开发板后端发起 POST，避免浏览器跨域。
+
+### 播放提示音（无需登录）
+
+```bash
+curl -sS --max-time 15 \
+  -H 'Content-Type: application/json' \
+  --data '{"name":"door"}' \
+  http://192.168.1.13/api/prompt
+```
+
+也可使用 `https://v831.gwghome.site/api/prompt`。请求会在开发板扬声器播放
+`/root/maix_dist/prompt/door.wav`，播放完成后返回 `{"ok":true,"name":"door"}`。
+`name` 只允许字母、数字、`_`、`-`，不含扩展名或路径；缺少/非法名称返回 `400`，
+正在播放时返回 `409 busy`。只有 `POST /api/prompt` 免鉴权，GET 或其他路径不开放。
 
 ### 配置
 

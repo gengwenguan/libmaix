@@ -340,12 +340,14 @@ fn route(
         };
     }
 
-    if https_available && !is_tls {
+    // 只有固定门口提示音的绿通 POST 公开；原 /api/prompt 仍需登录。
+    let public_prompt = request.method == "POST" && request.path == "/api/prompt/door";
+    if https_available && !is_tls && !public_prompt {
         return Routed::Response(Response::redirect(https_location(request)));
     }
 
     let cookie = request.headers.get("cookie").map(String::as_str);
-    let authorized = state.web_auth.authorized_cookie(cookie);
+    let authorized = public_prompt || state.web_auth.authorized_cookie(cookie);
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/login") => {
             return Routed::Response(if authorized {
@@ -436,10 +438,15 @@ fn route(
                 Routed::Response(Response::json(json!({"ok":false,"err":error.to_string()})))
             }
         },
-        ("POST", "/api/prompt") => {
-            let name = serde_json::from_slice::<Value>(&request.body)
-                .ok()
-                .and_then(|value| value.get("name")?.as_str().map(str::to_owned));
+        ("POST", "/api/prompt") | ("POST", "/api/prompt/door") => {
+            // 绿通只播放 door.wav，不接受外部名称；两入口复用同一播放服务。
+            let name = if public_prompt {
+                Some("door".to_owned())
+            } else {
+                serde_json::from_slice::<Value>(&request.body)
+                    .ok()
+                    .and_then(|value| value.get("name")?.as_str().map(str::to_owned))
+            };
             match name {
                 Some(name) if !crate::prompt::PromptService::valid_name(&name) => Routed::Response(
                     Response::json_status(400, json!({"ok":false,"err":"invalid name"})),

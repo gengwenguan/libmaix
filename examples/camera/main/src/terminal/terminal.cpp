@@ -975,7 +975,7 @@ void C_Terminal::RegisterHttpApis()
     //   404 {"ok":false,"err":"not found"}
     //   409 {"ok":false,"err":"busy"}                     另一个提示音正在播
     //   500 {"ok":false,"err":"play failed"}              ALSA 失败 / wav 格式不符
-    http->RegisterApi("POST", "/api/prompt",
+    const auto promptHandler =
         [this](const C_HttpServer::ApiRequest& req) -> C_HttpServer::ApiResponse {
             C_HttpServer::ApiResponse rsp;
             rsp.contentType = "application/json";
@@ -1047,6 +1047,14 @@ void C_Terminal::RegisterHttpApis()
                << "\",\"duration_ms\":" << durMs << "}";
             rsp.body = js.str();
             return rsp;
+        };
+    http->RegisterApi("POST", "/api/prompt", promptHandler);
+    // 绿通固定播放 door.wav，忽略外部名称，复用原接口的播放与 busy 保护。
+    http->RegisterApi("POST", "/api/prompt/door",
+        [promptHandler](const C_HttpServer::ApiRequest& req) {
+            const C_HttpServer::ApiRequest fixedRequest{
+                req.method, req.path, req.query, "{\"name\":\"door\"}"};
+            return promptHandler(fixedRequest);
         });
 
     // GET /api/photo/latest

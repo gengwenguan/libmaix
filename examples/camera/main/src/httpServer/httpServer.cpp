@@ -911,14 +911,17 @@ void C_HttpServer::HandleHttpRequest(int fd, C_SslConn* ssl, const std::string& 
         return;
     }
 
+    // 只有固定门口提示音的绿通 POST 公开；原 /api/prompt 仍需登录。
+    const bool publicPrompt = method == "POST" && path == "/api/prompt/door";
     // 有可用 HTTPS 监听时，管理页面和登录凭据一律不走明文。
-    if (!ssl && m_tlsServerFd >= 0) {
+    if (!ssl && m_tlsServerFd >= 0 && !publicPrompt) {
         SendHttpResponse(fd, ssl, 303, "See Other", "text/plain", "",
                          "Location: https://" + HttpsHost(request) + rawPath + "\r\n");
         return;
     }
 
     const bool authorized =
+        publicPrompt ||
         HasSessionCookie(HeaderValue(request, "Cookie"), m_authToken);
 
     if (method == "GET" && path == "/login") {
