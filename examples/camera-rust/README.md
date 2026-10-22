@@ -120,21 +120,21 @@ WebRTC 信令 API：
 WebRTC 仅发布 UDP6 host candidate，不经过 STUN、TURN 或 SFU。实况页浏览器只创建
 `recvonly` 音视频 transceiver；只允许一个低延时观看会话，新 offer 会替换旧会话。
 
-### 播放提示音（无需登录）
+### 提示音绿通（无需登录）
 
-`POST /api/prompt` 公开访问，HTTP/HTTPS 均可直接调用，无需登录、Cookie 或 Token：
+`POST /api/prompt/door` 支持 HTTP/HTTPS，无需登录、Cookie 或 Token：
 
 ```bash
-curl -sS --max-time 15 \
-  -H 'Content-Type: application/json' \
-  --data '{"name":"door"}' \
-  http://192.168.1.13/api/prompt
+curl -sS --max-time 15 -X POST http://192.168.1.13/api/prompt/door
 ```
 
-也可使用 `https://v831.gwghome.site/api/prompt`。播放共享 `prompt/door.wav` 后返回
-`{"ok":true,"name":"door"}`；名称非法/缺失返回 `400`，并发播放返回 `409 busy`。
-其他管理 API、页面及浏览器 WebSocket 仍需 `camera_session` 登录 Cookie，
-默认用户名 `admin`、密码 `12345`。C++ 版本使用相同接口和鉴权边界。
+也可使用 `https://v831.gwghome.site/api/prompt/door`。无需请求体，固定播放共享
+`prompt/door.wav`，播放完成后返回 `{"ok":true,"name":"door"}`；并发播放返回
+`409 busy`。外部 body/query 不能切换提示音，GET 不触发播放。
+原 `POST /api/prompt` 仍需登录和 `{"name":"door"}` 请求体，管理页面继续调用
+原接口。其他管理 API、页面和浏览器 WebSocket 同样需要 `camera_session`
+登录 Cookie，默认用户名 `admin`、密码 `12345`。C++ 版本使用相同接口和鉴权边界。
+两入口复用同一播放器和并发保护。
 
 ## camera-hub 分布式架构
 
