@@ -1,7 +1,6 @@
 use crate::actions::{ActionError, InvokeError};
 use crate::app::AppState;
 use crate::io::Connection;
-use crate::native::TlsContext;
 use crate::netinfo;
 use crate::sysinfo::SysInfo;
 use anyhow::{Context, Result};
@@ -31,18 +30,14 @@ pub struct HttpServers {
 }
 
 impl HttpServers {
-    pub fn start(state: Arc<AppState>, tls: Option<Arc<TlsContext>>) -> Result<Self> {
+    pub fn start(state: Arc<AppState>) -> Result<Self> {
         let shutdown = Arc::new(AtomicBool::new(false));
         let clients = Arc::new(Mutex::new(Vec::new()));
         let active = Arc::new(AtomicUsize::new(0));
         let sysinfo = Arc::new(SysInfo::default());
-        let https_available = tls.is_some();
         let mut accept_threads = Vec::new();
 
-        for (port, listener_tls) in [(80, None), (443, tls)] {
-            if port == 443 && listener_tls.is_none() {
-                continue;
-            }
+        for (port, listener_tls) in [(80, false), (443, true)] {
             let listener =
                 bind_dual_stack(port).with_context(|| format!("bind HTTP port {port}"))?;
             let state = state.clone();
@@ -63,7 +58,6 @@ impl HttpServers {
                             shutdown_flag,
                             client_threads,
                             active_clients,
-                            https_available,
                         )
                     })?,
             );
@@ -105,13 +99,12 @@ fn bind_dual_stack(port: u16) -> Result<TcpListener> {
 #[allow(clippy::too_many_arguments)]
 fn accept_loop(
     listener: TcpListener,
-    tls: Option<Arc<TlsContext>>,
+    tls: bool,
     state: Arc<AppState>,
     sysinfo: Arc<SysInfo>,
     shutdown: Arc<AtomicBool>,
     clients: Arc<Mutex<Vec<JoinHandle<()>>>>,
     active: Arc<AtomicUsize>,
-    https_available: bool,
 ) {
     while !shutdown.load(Ordering::Acquire) {
         match listener.accept() {
@@ -122,14 +115,13 @@ fn accept_loop(
                 }
                 let state = state.clone();
                 let sysinfo = sysinfo.clone();
-                let tls = tls.clone();
                 let active_for_thread = active.clone();
                 match thread::Builder::new()
                     .name("http-client".to_owned())
                     .stack_size(256 * 1024)
                     .spawn(move || {
-                        let result = Connection::new(stream, tls).and_then(|connection| {
-                            handle_client(connection, &state, &sysinfo, https_available)
+                        let result = Connection::server(stream, &state.tls, tls).and_then(|connection| {
+                            handle_client(connection, &state, &sysinfo, state.tls.current().is_some())
                         });
                         if let Err(error) = result {
                             eprintln!("HTTP client failed: {error:#}");

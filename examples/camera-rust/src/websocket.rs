@@ -1,7 +1,6 @@
 use crate::app::AppState;
 use crate::hub::Subscription;
 use crate::io::Connection;
-use crate::native::TlsContext;
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -23,21 +22,18 @@ pub struct WebSocketServers {
 }
 
 impl WebSocketServers {
-    pub fn start(state: Arc<AppState>, tls: Option<Arc<TlsContext>>) -> Result<Self> {
+    pub fn start(state: Arc<AppState>) -> Result<Self> {
         let shutdown = Arc::new(AtomicBool::new(false));
         let clients = Arc::new(Mutex::new(Vec::new()));
         let active = Arc::new(AtomicUsize::new(0));
         let mut accept_threads = Vec::new();
 
         for (port, listener_tls) in [
-            (8081, None),
-            (8082, None),
-            (8444, tls.clone()),
-            (8445, tls.clone()),
+            (8081, false),
+            (8082, false),
+            (8444, true),
+            (8445, true),
         ] {
-            if port >= 8444 && listener_tls.is_none() {
-                continue;
-            }
             let listener =
                 bind_dual_stack(port).with_context(|| format!("bind WebSocket port {port}"))?;
             let state = state.clone();
@@ -95,7 +91,7 @@ fn bind_dual_stack(port: u16) -> Result<TcpListener> {
 
 fn accept_loop(
     listener: TcpListener,
-    tls: Option<Arc<TlsContext>>,
+    tls: bool,
     state: Arc<AppState>,
     shutdown: Arc<AtomicBool>,
     clients: Arc<Mutex<Vec<JoinHandle<()>>>>,
@@ -110,13 +106,12 @@ fn accept_loop(
                 }
                 let state = state.clone();
                 let shutdown = shutdown.clone();
-                let tls = tls.clone();
                 let active_for_thread = active.clone();
                 match thread::Builder::new()
                     .name("ws-client".to_owned())
                     .stack_size(256 * 1024)
                     .spawn(move || {
-                        let result = Connection::new(stream, tls)
+                        let result = Connection::server(stream, &state.tls, tls)
                             .and_then(|connection| handle_client(connection, state, shutdown));
                         if let Err(error) = result {
                             eprintln!("WebSocket client failed: {error:#}");

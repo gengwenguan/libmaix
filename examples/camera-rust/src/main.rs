@@ -1,11 +1,9 @@
 use anyhow::{Context, Result};
 use camera_rust::app::AppState;
 use camera_rust::http::HttpServers;
-use camera_rust::native::TlsContext;
 use camera_rust::websocket::WebSocketServers;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -41,10 +39,8 @@ fn run() -> Result<()> {
     let runtime_dir = runtime_directory()?;
     let state = AppState::build(runtime_dir.clone())?;
     eprintln!("[rust-stage] application state ready");
-    let tls = load_tls(&runtime_dir);
-
-    let http = HttpServers::start(state.clone(), tls.clone())?;
-    let websocket = WebSocketServers::start(state.clone(), tls)?;
+    let http = HttpServers::start(state.clone())?;
+    let websocket = WebSocketServers::start(state.clone())?;
     eprintln!("[rust-stage] network listeners ready");
     state.engine.start()?;
     eprintln!("[rust-stage] native media engine ready");
@@ -72,27 +68,4 @@ fn runtime_directory() -> Result<PathBuf> {
         .parent()
         .map(PathBuf::from)
         .context("executable has no parent directory")
-}
-
-fn load_tls(runtime_dir: &std::path::Path) -> Option<Arc<TlsContext>> {
-    let managed_cert = runtime_dir.join("state/tls/fullchain.pem");
-    let managed_key = runtime_dir.join("state/tls/private.key");
-    let legacy_cert = runtime_dir.join("cert/server.crt");
-    let legacy_key = runtime_dir.join("cert/server.key");
-    let (cert, key) = if managed_cert.is_file() && managed_key.is_file() {
-        (managed_cert, managed_key)
-    } else {
-        (legacy_cert, legacy_key)
-    };
-    if !cert.is_file() || !key.is_file() {
-        eprintln!("TLS certificate missing; HTTPS/WSS disabled");
-        return None;
-    }
-    match TlsContext::new(&cert.to_string_lossy(), &key.to_string_lossy()) {
-        Ok(context) => Some(Arc::new(context)),
-        Err(error) => {
-            eprintln!("TLS init failed; HTTPS/WSS disabled: {error:#}");
-            None
-        }
-    }
 }

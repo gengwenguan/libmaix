@@ -18,5 +18,6 @@ pub mod remote_hub;
 pub mod snapshot;
 pub mod sysinfo;
 pub mod talk;
+pub mod tls;
 pub mod webrtc;
 pub mod websocket;

@@ -10,17 +10,29 @@ use std::time::{Duration, Instant};
 pub struct Connection {
     stream: TcpStream,
     tls: Option<TlsConnection>,
+    // Keep the context alive until the connection has released its native SSL object.
+    _tls_context: Option<Arc<TlsContext>>,
 }
 
 impl Connection {
+    pub fn server(stream: TcpStream, provider: &crate::tls::TlsService, secure: bool) -> Result<Self> {
+        let context = if secure {
+            Some(provider.current().context("TLS certificate unavailable")?)
+        } else {
+            None
+        };
+        Self::new(stream, context)
+    }
+
     pub fn new(stream: TcpStream, tls: Option<Arc<TlsContext>>) -> Result<Self> {
         stream.set_nonblocking(true)?;
         stream.set_nodelay(true)?;
-        let tls = tls
+        let context = tls;
+        let tls = context.as_ref()
             .map(|context| context.accept(stream.as_raw_fd()))
             .transpose()
             .context("TLS accept")?;
-        Ok(Self { stream, tls })
+        Ok(Self { stream, tls, _tls_context: context })
     }
 
     pub fn read_some(&mut self, output: &mut [u8]) -> std::io::Result<Option<usize>> {

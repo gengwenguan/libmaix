@@ -86,6 +86,7 @@ pub struct AppState {
     pub logs: Arc<BroadcastHub>,
     pub webrtc: Arc<WebRtcService>,
     pub remote_hub: RemoteHub,
+    pub tls: Arc<crate::tls::TlsService>,
     pub web_auth: WebAuth,
     _mqtt: MqttReporter,
     _cleaner: RecordCleaner,
@@ -128,11 +129,13 @@ impl AppState {
         let prompt = PromptService::new(runtime_dir.join("prompt"), engine.clone());
         let talk = TalkService::new(engine.clone());
         let webrtc = Arc::new(WebRtcService::start(webrtc_media, engine.clone())?);
+        let tls = crate::tls::TlsService::load(&runtime_dir);
         let remote_hub = RemoteHub::start(
             config.clone(),
             remote_hub_media,
             engine.clone(),
             snapshot.clone(),
+            tls.clone(),
         )?;
         let mqtt = MqttReporter::start(config.clone())?;
         let web_auth = WebAuth::from_env();
@@ -167,6 +170,7 @@ impl AppState {
             logs,
             webrtc,
             remote_hub,
+            tls,
             web_auth,
             _mqtt: mqtt,
             _cleaner: cleaner,

@@ -14,10 +14,6 @@ DEVICE_HOST="192.168.1.13"
 DEVICE_DIR="/root/maix_dist"
 DEVICE_PASS="root"
 
-HUB_USER="${HUB_USER:-android}"
-HUB_HOST="${HUB_HOST:-mi6.gwghome.site}"
-HUB_EDGE_KEY="${HUB_EDGE_KEY:-/home/android/.ssh/camera-hub-edge-acme-rsa}"
-
 TOOLCHAIN_DIR="/opt/toolchain-sunxi-musl/toolchain/bin"
 RUST_TARGET="armv7-unknown-linux-musleabihf"
 LOCAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -132,33 +128,6 @@ do_build() {
     log "构建完成：dist/camera_rust + dist/camera_cpp"
 }
 
-provision_hub_edge_key() {
-    log "安装 Camera-hub ACME SSH 公钥到开发板"
-    local public_key
-    public_key=$(ssh -6 -o StrictHostKeyChecking=no \
-        "${HUB_USER}@${HUB_HOST}" \
-        "test -r '${HUB_EDGE_KEY}.pub' && cat '${HUB_EDGE_KEY}.pub'") || {
-        warn "Camera-hub ACME 公钥尚未生成，先部署 camera-hub 后再重试"
-        return 0
-    }
-    ssh -o StrictHostKeyChecking=no ${BUILD_SSH_OPT} \
-        "${BUILD_USER}@${BUILD_SSH_TARGET}" "
-        sshpass -p '${DEVICE_PASS}' ssh ${SSH_COMPAT_OPTS} \
-            ${DEVICE_USER}@${DEVICE_HOST} \
-            'mkdir -p /etc/dropbear;
-             touch /etc/dropbear/authorized_keys;
-             grep -Fqx \"${public_key}\" /etc/dropbear/authorized_keys ||
-                 echo \"${public_key}\" >> /etc/dropbear/authorized_keys;
-             chmod 600 /etc/dropbear/authorized_keys'
-    "
-    ssh -6 -o StrictHostKeyChecking=no "${HUB_USER}@${HUB_HOST}" "
-        sed -i \"s/^CAMERA_HUB_EDGE_ACME_ENABLED=.*/CAMERA_HUB_EDGE_ACME_ENABLED='true'/\" \
-            /home/android/.config/camera-hub.env
-        nohup /usr/local/bin/camera-hub-acme-edge \
-            >> /home/android/camera-hub-acme-edge.log 2>&1 &
-    "
-}
-
 do_push() {
     log "推送 C++/Rust 双版本到 ${DEVICE_HOST}:${DEVICE_DIR}"
     ssh -o StrictHostKeyChecking=no ${BUILD_SSH_OPT} \
@@ -221,7 +190,6 @@ do_push() {
              fi
              sleep 1'
     "
-    provision_hub_edge_key
     log "双版本部署完成，当前运行 Rust"
 }
 

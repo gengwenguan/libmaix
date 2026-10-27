@@ -2,6 +2,7 @@ use crate::config::{AppConfig, RuntimeConfig};
 use crate::native::NativeEngine;
 use crate::netinfo;
 use crate::snapshot::SnapshotService;
+use crate::tls::{CertificateUpdate, TlsService};
 use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -13,6 +14,7 @@ use std::io::{Read, Write};
 use std::net::{Ipv6Addr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::sync::mpsc::{self, Sender, SyncSender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -154,15 +156,36 @@ pub struct RemoteHub {
     threads: Vec<JoinHandle<()>>,
 }
 
+struct CertificateJob {
+    update: CertificateUpdate,
+    reply: Sender<String>,
+}
+
 impl RemoteHub {
     pub fn start(
         config: Arc<RuntimeConfig>,
         media: Arc<HubMediaInput>,
         engine: Arc<NativeEngine>,
         snapshot: Arc<SnapshotService>,
+        tls: Arc<TlsService>,
     ) -> Result<Self> {
         let status = Arc::new(Mutex::new(RemoteHubStatus::default()));
         let stop = Arc::new(AtomicBool::new(false));
+        let (certificate_sender, certificate_receiver) = mpsc::sync_channel::<CertificateJob>(1);
+        let certificate_thread = {
+            let tls = tls.clone();
+            let stop = stop.clone();
+            thread::Builder::new().name("camera-tls-install".to_owned())
+                .stack_size(256 * 1024).spawn(move || {
+                    while !stop.load(Ordering::Acquire) {
+                        match certificate_receiver.recv_timeout(Duration::from_millis(200)) {
+                            Ok(job) => { let _ = job.reply.send(tls.acknowledge(&job.update)); }
+                            Err(mpsc::RecvTimeoutError::Timeout) => {}
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        }
+                    }
+                })?
+        };
         let frame_thread = {
             let config = config.clone();
             let media = media.clone();
@@ -174,14 +197,14 @@ impl RemoteHub {
                 .name("camera-hub-frame-link".to_owned())
                 .stack_size(384 * 1024)
                 .spawn(move || {
-                    frame_link_loop(config, media, engine, frame_snapshot, status, stop)
+                    frame_link_loop(config, media, engine, frame_snapshot, status, stop, tls, certificate_sender)
                 })?
         };
         Ok(Self {
             engine,
             status,
             stop,
-            threads: vec![frame_thread],
+            threads: vec![frame_thread, certificate_thread],
         })
     }
 
@@ -206,6 +229,7 @@ impl Drop for RemoteHub {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn frame_link_loop(
     config: Arc<RuntimeConfig>,
     media: Arc<HubMediaInput>,
@@ -213,6 +237,8 @@ fn frame_link_loop(
     snapshot: Arc<SnapshotService>,
     status: Arc<Mutex<RemoteHubStatus>>,
     stop: Arc<AtomicBool>,
+    tls: Arc<TlsService>,
+    certificate_sender: SyncSender<CertificateJob>,
 ) {
     while !stop.load(Ordering::Acquire) {
         let current = config.current();
@@ -224,6 +250,7 @@ fn frame_link_loop(
         }
         let result = resolved_endpoint(&current).and_then(|endpoint| {
             let mut websocket = FrameWebSocket::connect(&endpoint, &current.camera_hub_device_id)?;
+            let (reply_sender, replies) = mpsc::channel::<String>();
             engine.set_remote_video_active(true);
             let mut sequence = 1u32;
             let mut last_hello = Instant::now() - Duration::from_secs(30);
@@ -247,9 +274,13 @@ fn frame_link_loop(
                         "firmware": env!("CARGO_PKG_VERSION"),
                         "ipv6": netinfo::global_ipv6(&latest.mqtt_iface),
                         "last_photo": snapshot.latest_camera_hub_source_name(),
+                        "certificate": { "protocol": 1, "bundle_sha256": tls.hash() },
                     });
                     websocket.send_text(&hello.to_string())?;
                     last_hello = Instant::now();
+                }
+                while let Ok(reply) = replies.try_recv() {
+                    websocket.send_text(&reply)?;
                 }
                 if let Some(packet) = media.pop_frame(Duration::from_millis(5)) {
                     websocket.send_binary(&encode_link_packet(sequence, &packet))?;
@@ -262,6 +293,21 @@ fn frame_link_loop(
                         0x1 => {
                             if let Some(response) = clock_sync_response(&payload) {
                                 websocket.send_text(&response)?;
+                            } else if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&payload) {
+                                if value["type"].as_str() == Some("certificate_update") {
+                                    let hash = value["bundle_sha256"].as_str().unwrap_or_default().to_owned();
+                                    let job = serde_json::from_value::<CertificateUpdate>(value)
+                                        .map_err(anyhow::Error::from).and_then(|update| {
+                                            certificate_sender.try_send(CertificateJob { update, reply: reply_sender.clone() })
+                                                .map_err(|_| anyhow::anyhow!("certificate worker busy"))
+                                        });
+                                    if let Err(error) = job {
+                                        websocket.send_text(&json!({
+                                            "type": "certificate_ack", "bundle_sha256": hash,
+                                            "ok": false, "reloaded": false, "error": error.to_string(),
+                                        }).to_string())?;
+                                    }
+                                }
                             }
                         }
                         0x2 => handle_link_binary(&payload, &snapshot, &status),

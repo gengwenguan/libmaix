@@ -90,9 +90,13 @@ HTTPS/WSS 优先读取共享运行状态目录：
 /root/maix_dist/state/tls/private.key
 ```
 
-Camera-hub 在高性能节点上运行 ACME 客户端，为开发板当前公网 IPv6 申请 Let’s
-Encrypt short-lived IP 证书，并通过 SSH 原子同步到该目录。Rust/C++ 两种版本共用
-同一证书；证书变化后 Camera-hub 调用 `switch_camera.sh` 重启当前活动版本。
+Camera-hub 在高性能节点上运行 ACME 客户端，为开发板域名申请 Let’s Encrypt
+shortlived 证书，通过现有无 Token 的媒体 WS 下发 `certificate_update`。
+Rust 的独立任务验证 SHA-256 包指纹及证书/私钥匹配，先保存 `state/tls/bundle.json`
+权威缓存和双 PEM，再替换共享 TLS 上下文并返回 `certificate_ack`。
+新 HTTPS/WSS 连接使用新证书，已有连接保留旧上下文；媒体采集、上传和录像不重启。
+周期性 hello 声明 `certificate.protocol=1` 和已加载包指纹；离线后的重试直接使用
+Hub 签发缓存。C++ 版本不声明此协议，切换后 Hub 会报告目标不支持并保留缓存。
 `cert/server.crt` 只保留为首次迁移前的自签名回退，不再由部署脚本覆盖。
 
 开发板的 HTTP/80 提供：

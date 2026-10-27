@@ -13,18 +13,19 @@
 #include <errno.h>
 #include <string.h>
 #include <stdint.h>
+#include <mutex>
 
 namespace {
 // 进程级一次性 OpenSSL 初始化。OpenSSL 1.1+ 一般会自动初始化，但为兼容老版本/确定性，
 // 仍显式调用 SSL_library_init 等。多次调用是幂等的。
 static void EnsureSslInited()
 {
-    static bool inited = false;
-    if (inited) return;
-    SSL_library_init();
-    SSL_load_error_strings();
-    OpenSSL_add_all_algorithms();
-    inited = true;
+    static std::once_flag inited;
+    std::call_once(inited, [] {
+        SSL_library_init();
+        SSL_load_error_strings();
+        OpenSSL_add_all_algorithms();
+    });
 }
 
 static void DumpOpenSslErr(const char* tag)

@@ -12,6 +12,7 @@ libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha1 = "0.10"
+sha2 = "0.10"
 tokio = { version = "1.45", features = ["rt", "sync", "time"] }
 webrtc = { git = "https://github.com/gengwenguan/webrtc", rev = "a91689c3dd237ea48a0ce5a827a69d3807420a5c" }
 
